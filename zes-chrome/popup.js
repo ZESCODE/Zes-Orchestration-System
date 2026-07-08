@@ -31,6 +31,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  // Settings button
+  document.getElementById('settingsBtn').addEventListener('click', (e) => {
+    e.preventDefault();
+    chrome.tabs.create({ url: 'http://localhost:8083/#settings' });
+  });
+
   // Open dashboard
   document.getElementById('openDashboard').addEventListener('click', () => {
     chrome.tabs.create({ url: 'http://localhost:8083' });

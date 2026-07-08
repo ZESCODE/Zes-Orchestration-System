@@ -33,7 +33,9 @@ You (NL) → Codex (superpowers) → 9Router (:20128) → 18 AI Providers
 | **Headless Chrome** | 9222 | `chromium-cdp` | Browser automation (CDP) |
 | **ttyd** | 7173 | `ttyd` | Web terminal |
 | **Tor** | 9050/9051 | `tor` | SOCKS5 proxy + ControlPort for IP rotation |
-| **SSH** | 8022 | — | Remote access |
+| **SSH** | 8022 | `sshd` (down) | Remote access (stopped) |
+| **Socat** | 8090 | `socat` | TCP bridge |
+| **Gmail** | — | — | Composio OAuth + IMAP/SMTP via gmail-tool |
 
 ## Dashboard API Endpoints
 
@@ -73,6 +75,12 @@ You (NL) → Codex (superpowers) → 9Router (:20128) → 18 AI Providers
 | `model-rotation` | weekly Sun 00:00 | Check all provider health |
 | `dashboard-snapshot` | every 30 min | Save service status snapshot |
 | `ip-rotation` | every 30 min | Rotate Tor exit IP/country |
+
+## Recent Fixes (2026-07-09)
+- **Extension port error**: Fixed `PAGE_LOADED` handler in `background.js` — added `sendResponse()` + `return true` for MV3 async compliance
+- **Content script**: Added `.catch(() => {})` to suppress port closure warning
+- **Dashboard v3**: Uses `updateStatus(d)` instead of `render(d)` for status refreshes — preserves chat, tabs, and DOM between polls
+- **Hermes check**: Changed from TCP port 8787 to binary check — now shows correct running status
 
 ## Dashboard Persistence
 - Active tab saved to `localStorage` (`zesActiveTab`)

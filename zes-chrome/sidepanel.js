@@ -41,6 +41,11 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
+  // Settings button
+  document.getElementById('settingsBtn').addEventListener('click', () => {
+    chrome.tabs.create({ url: 'http://localhost:8083/#settings' });
+  });
+
   // Load initial state
   loadState();
 });

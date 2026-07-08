@@ -72,5 +72,5 @@
     type: 'PAGE_LOADED',
     url: window.location.href,
     title: document.title
-  });
+  }).catch(() => {});  // Suppress port closure error
 })();

@@ -48,7 +48,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'PAGE_LOADED':
       console.log(`Page loaded: ${message.title} (${message.url})`);
       sendResponse({ received: true });
-      break;
+      return true;  // Keep port open for MV3 async response
   }
 });
 

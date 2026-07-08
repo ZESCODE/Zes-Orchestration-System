@@ -127,3 +127,29 @@ curl -s http://localhost:8083/api/status
 
 - **Composio SDK** — Gmail OAuth (`arfaxtrade@gmail.com`)
 - **IMAP/SMTP** — Alternative email client via `gmail-tool`
+
+## Integrated Modules (from Termux-Claw)
+
+The following modules from [arfaXdev/Termux-Claw](https://github.com/arfaXdev/Termux-Claw) have been adapted for 9Router:
+
+| Module | File | Port | Purpose |
+|--------|------|------|---------|
+| **Swarm Orchestrator** | `services/zes_swarm.py` | 5030 | Multi-agent workflows via 9Router |
+| **Service Toggle** | `services/service_toggle.py` | — | runsv-aware service management |
+| **Tool Scanner** | `services/tool_scanner.py` | — | Discover executables and services |
+| **Context Feeder** | `services/context_feeder.py` | — | Watch workspace for agent context |
+| **OpenClaw Config** | `services/openclaw.json` | — | Agent orchestration with 9Router |
+
+Start the swarm:
+```bash
+python3 ~/Zes-System/services/zes_swarm.py --port 5030 &
+```
+
+List/toggle services:
+```bash
+python3 ~/Zes-System/services/service_toggle.py list
+```
+
+## Plugins
+
+See `plugins/README.md` for plugin integration details.
