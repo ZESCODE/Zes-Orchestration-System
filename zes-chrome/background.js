@@ -39,7 +39,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'CHAT_MESSAGE':
       proxyToDashboard('/api/agent/chat', {
         message: message.text,
-        history: message.history || []
+        history: message.history || [],
+        model: message.model || 'groq/llama-3.3-70b-versatile'
       })
         .then(res => sendResponse(res))
         .catch(err => sendResponse({ error: err.message }));

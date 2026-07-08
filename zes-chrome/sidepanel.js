@@ -63,7 +63,8 @@ async function sendMessage() {
     const response = await chrome.runtime.sendMessage({
       type: 'CHAT_MESSAGE',
       text,
-      history: chatHistory.slice(-10)
+      history: chatHistory.slice(-10),
+      model: 'groq/llama-3.3-70b-versatile'
     });
 
     document.getElementById(thinkingId)?.remove();
