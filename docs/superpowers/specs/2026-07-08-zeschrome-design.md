@@ -290,3 +290,70 @@ zes-chrome/
 - `sidepanel.html/css` — Side panel structure
 - `background.js` — Service worker patterns
 - `js/speechify.js` — Speech-to-text (optional)
+
+---
+
+## 11. Codex Integration (Critical Feature)
+
+### How Codex Talks to zesChrome
+
+The extension exposes a local HTTP API + MCP interface so Codex agents can control browser actions programmatically.
+
+```
+You (NL) → Codex CLI
+               │
+               ├──→ 9Router (:20128) — AI for code
+               │
+               └──→ zesChrome MCP API (:5901) — Browser control
+                        │
+                        ├── Auth websites
+                        ├── Browse pages
+                        ├── Screenshot + extract
+                        ├── Fill forms
+                        └── Monitor pages
+```
+
+### MCP Server (`:5901`)
+
+A lightweight HTTP server running alongside the extension that Codex can call:
+
+| Tool | Description | Codex Use Case |
+|------|-------------|----------------|
+| `browse(url)` | Navigate to URL, return page text | "Go to github.com and check my PRs" |
+| `screenshot()` | Capture visible tab | "Show me what's on the page" |
+| `click(selector)` | Click an element | "Click the login button" |
+| `type(selector, text)` | Type into a field | "Type my email into the form" |
+| `extract(selector)` | Get text from element | "Read the error message" |
+| `auth(service)` | Trigger OAuth for a service | "Connect my Gmail account" |
+| `wait(selector)` | Wait for element to appear | "Wait for the page to load" |
+| `run_task(task)` | Full autonomous: "log into admin panel" | "Login to my dashboard" |
+
+### Agent-Driven Setup Flow
+
+1. User: "Set up zesChrome with my accounts"
+2. Codex calls `browse("https://console.cloud.google.com")`
+3. Codex calls `type("#email", "arfaxtrade@gmail.com")`
+4. Codex calls `click("#next")`
+5. ... (full OAuth flow handled by Codex agents)
+6. User: "Now check my Gmail" → Codex uses `auth("gmail")` → reads inbox
+
+### Architecture Addition
+
+```
+Browser Extension (zesChrome)
+└── Background SW ──→ MCP Server (:5901)
+                           │
+                    Codex CLI ←→ You (NL)
+```
+
+The MCP Server runs as a standalone Node.js process that:
+- Communicates with the extension via `chrome.runtime.connectNative` or HTTP bridge
+- Exposes MCP tools that Codex can discover and call
+- Handles authentication flows (OAuth popups, credential entry)
+- Reports browser state back to Codex
+
+### Benefits
+- **Codex becomes the agent orchestrator** — it plans, zesChrome executes
+- **Natural language browser control** — "Log into my bank and download statements"
+- **Self-configuring** — Codex can set up the extension's own auth
+- **Extends Codex's capabilities** — it can now do anything in a browser
