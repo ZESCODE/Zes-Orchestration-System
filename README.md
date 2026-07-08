@@ -6,23 +6,89 @@
 
 **URL:** http://localhost:8083
 
-The ZES Control Center shows all services, AI provider status, system environment, and sparkline history — with a mobile-responsive left drawer nav.
+The ZES Control Center shows all services, AI provider status, system environment, and sparkline history — with a mobile-responsive left drawer nav and custom **Z** logo with gradient border.
 
 ## Architecture
 
 ```
 Termux (Android aarch64) + Debian proot
-├── 9Router v0.5.20       — AI provider router (:20128, 17 providers)
-├── Hermes Agent          — AI agent gateway (:8787)
+├── 9Router v0.5.20       — AI provider router (:20128, 18 providers)
+├── Hermes Gateway        — AI agent cron, scheduler, automation
 ├── OpenCode              — AI coding agent (:9876)
 ├── VS Code Server        — Web VS Code with Cline/Continue (:8000)
 ├── Codex App Server      — AI API proxy + Zen gateway (:5900)
-├── Composio SDK          — Gmail/API integrations
 ├── Dashboard             — ZES Control Center (:8083)
+├── runit (runsv)         — Service supervision
 ├── Tor                   — Anonymizing proxy (:9050)
 ├── Headless Chromium     — Browser automation (:9222)
-└── runsv (runit)         — Service supervision
+└── ttyd                  — Web terminal (:7173)
 ```
+
+## 9Router — 18 Providers
+
+### OAuth
+- **GitHub Copilot** — `arfaXdev`, free Copilot tier
+- **Cline** — `arfaxtrade@gmail.com` via WorkOS
+- **Codex (OpenAI)** — `arfaxtrade@gmail.com` free tier
+- **Gemini CLI** — Google Cloud OAuth
+- **Qoder** — Device auth, 30-day session
+- **Kiro** — ⚠️ AWS Builder ID OAuth expired, needs re-auth
+
+### API Key
+- NVIDIA NIM, Groq, Gemini, DeepSeek, Cerebras, OpenRouter, Anthropic, Cloudflare AI, **Mistral AI**
+
+### OpenAI-Compatible Nodes
+| Prefix | Name | Endpoint | Proxy |
+|--------|------|----------|-------|
+| `oz` | Zen OpenCode | :5900/codex-api/zen-proxy/v1 | Direct |
+| `he` | Hermes AI | :8787 | Tor SOCKS5 |
+| `oc` | OpenClaw Proxy | :4040/v1 | Tor SOCKS5 |
+
+## Codex Configuration
+
+Codex routes through 9Router for all AI calls:
+
+```toml
+model = "groq/llama-3.3-70b-versatile"       # Fast, direct routing
+model_provider = "9router"
+[agents.subagent]
+model = "gh/gpt-5.4-mini-free-auto"           # GitHub Copilot free tier
+```
+
+Uses OpenAI Responses API wire format. `OPENAI_API_KEY` env var cleared to prevent routing conflicts.
+
+## Installed Skills (7 personal + superpowers)
+
+### Custom Skills
+- **service-management** — runsv service control, proot access, port checks
+- **9router-provider-check** — CLI token gen, provider status, model routing
+- **spec-driven-development** — Write spec before code (*from addyosmani/agent-skills*)
+- **incremental-implementation** — Build in testable slices (*from addyosmani/agent-skills*)
+- **source-driven-development** — Understand code before changing (*from addyosmani/agent-skills*)
+- **code-simplification** — Reduce complexity, clarify logic (*from addyosmani/agent-skills*)
+- **ci-cd-and-automation** — Automate builds, services, deployments (*from addyosmani/agent-skills*)
+
+### Superpowers (loaded via plugin)
+- brainstorming, dispatching-parallel-agents, executing-plans, writing-plans
+- test-driven-development, systematic-debugging
+- requesting-code-review, receiving-code-review, finishing-a-development-branch
+- verification-before-completion, subagent-driven-development
+
+## Services
+
+| Service | Port | Runsv | Purpose |
+|---------|------|-------|---------|
+| Dashboard | 8083 | `dashboard8083` | ZES Control Center |
+| 9Router | 20128 | — | AI provider router |
+| Codex Server | 5900 | — | AI API proxy + Zen gateway |
+| Hermes Gateway | — | `hermes-gateway` | Cron, scheduler, agent backend |
+| OpenCode | 9876 | `opencode` | AI coding agent |
+| VS Code Server | 8000 | `vscode-server` | Web VS Code |
+| ttyd | 7173 | `ttyd` | Web terminal |
+| Headless Chrome | 9222 | `chromium-cdp` | Browser automation |
+| Tor | 9050 | `tor` | SOCKS5 proxy |
+| Socat | 8090 | `socat` | TCP bridge |
+| SSH | 8022 | — | Remote access |
 
 ## Quick Links
 
@@ -36,60 +102,25 @@ Termux (Android aarch64) + Debian proot
 | OpenCode Server | http://localhost:9876 |
 | VS Code Server | http://localhost:8000 |
 
-## 9Router Providers (17)
-
-### OAuth
-- **GitHub Copilot** — `arfaXdev`, free Copilot tier
-- **Cline** — `arfaxtrade@gmail.com` via WorkOS
-- **Codex (OpenAI)** — `arfaxtrade@gmail.com` free tier
-- **Gemini CLI** — `arfaxtrade@gmail.com` Google Cloud
-- **Qoder** — Device auth, 30-day session
-- **Kiro** — AWS Builder ID (needs re-auth)
-
-### API Key
-- NVIDIA NIM, Groq, Gemini, DeepSeek, Cerebras, OpenRouter, Anthropic, Cloudflare AI
-
-### OpenAI-Compatible Nodes
-| Prefix | Name | Endpoint | Proxy |
-|--------|------|----------|-------|
-| `oz` | Zen OpenCode | :5900/codex-api/zen-proxy/v1 | Direct |
-| `he` | Hermes AI | :8787 | Tor SOCKS5 |
-| `oc` | OpenClaw Proxy | :4040/v1 | Tor SOCKS5 |
-
-## Running Services
-
-| Service | Port | Status |
-|---------|------|--------|
-| Dashboard | 8083 | ✅ |
-| 9Router | 20128 | ✅ |
-| VS Code Server | 8000 | ✅ |
-| Hermes Gateway | 8787 | ✅ |
-| OpenCode | 9876 | ✅ |
-| Codex Server | 5900 | ✅ |
-| Headless Chrome | 9222 | ✅ |
-| Tor | 9050 | ✅ |
-| SSH | 8022 | ✅ |
-| Socat | 8090 | ✅ |
-
 ## Common Commands
 
 ```bash
+# Start all services
+bash ~/startall.sh
+
+# Stop all services
+bash ~/stopall.sh
+
 # Service management
 sv status /data/data/com.termux/files/usr/var/service/*
 sv restart dashboard8083
 
-# 9Router CLI
+# 9Router API
 TOKEN=$(python3 -c "import hashlib;d=open('$HOME/.9router/machine-id').read().strip();s=open('$HOME/.9router/auth/cli-secret').read().strip();print(hashlib.sha256((d+'9r-cli-auth'+s).encode()).hexdigest()[:16])")
 curl -H "x-9r-cli-token: $TOKEN" http://localhost:20128/api/providers
 
 # Dashboard API
 curl -s http://localhost:8083/api/status
-
-# Proot access
-proot-distro login debian
-
-# Hermes cron
-hermes cron list
 ```
 
 ## Gmail Integration
