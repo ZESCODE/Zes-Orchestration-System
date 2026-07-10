@@ -88,3 +88,42 @@ chrome.storage.local.set({ debugMode: true })
 | `js/gemini-proxy.js` | New: storage intercept + fetch reroute |
 | `js/background.js` | Fixed AI_API_URL, added transcribeAudio handler |
 | `js/voicekeyboard.js` | Added sendTo9Router fallback function |
+
+## OpenClaw Patterns (Android Assistant — v2026.6.1)
+
+Five modules were ported from [openclaw-android-assistant](https://github.com/openclaw/openclaw) 
+(19,872 files, TypeScript monorepo with embedded Android APK) into `zes-chrome/mcp-server/`:
+
+### Ported Modules
+
+| Module | File | Lines | Source Pattern |
+|--------|------|-------|----------------|
+| CDP Helpers | `mcp-server/cdp-helpers.js` | 167 | `extensions/browser/src/browser/cdp.ts` — WS management, screenshot (viewport + full-page), target filtering, `normalizeCdpWsUrl` |
+| Agent Stream | `mcp-server/agent-stream.js` | 105 | `packages/agent-core/src/agent-loop.ts` — event-driven lifecycle with `push/subscribe/end`, SSE formatting |
+| Tool Repair | `mcp-server/tool-repair.js` | 161 | `packages/tool-call-repair/` — fuzzy name matching (40+ misspellings), field aliasing (css→selector, href→url), schema validation |
+| Schema Validate | `mcp-server/schema-validate.js` | 71 | `packages/llm-core/src/validation.ts` — JSON Schema-compatible tool argument validation with type checking |
+| 9Router Provider | `mcp-server/9router-provider.js` | 222 | `extensions/litellm/` + `plugin-sdk/provider-auth.ts` — model catalog (8 models), streaming, embeddings, auth abstraction |
+| Gateway Protocol | `mcp-server/gateway-protocol.js` | 131 | `packages/gateway-protocol/` — typed event types (14), EventBus with wildcard listeners, SSE formatting |
+
+### Skills Ported from `.agents/skills/`
+
+| Skill | File | Source |
+|-------|------|--------|
+| Technical Documentation | `.agents/skills/technical-documentation/SKILL.md` | Direct copy |
+| ZES Debugging | `.agents/skills/openclaw-debugging/SKILL.md` | Adapted: service checks, 9Router diagnostics, Chrome CDP, MCP health |
+| GitCrawl ZES | `.agents/skills/gitcrawl-zes/SKILL.md` | Adapted: ZES repo commands, path references |
+
+### Cline + Continue VS Code Config
+
+Cline and Continue are configured through VS Code Server (`:8000`) to use 9Router:
+
+| Plugin | Provider | Model | MCP |
+|--------|----------|-------|-----|
+| **Cline** | OpenAI-compat → `:20128/v1` | `ds/deepseek-v4-flash` | `zes-chrome` (stdio) + `zes-9router` (http) |
+| **Continue** | OpenAI-compat → `:20128/v1` | 5 models (Claude, DeepSeek, GPT-5.4, Groq, Gemini) | `zes-chrome-mcp` (http) |
+
+Config files:
+- `~/.config/Code-Server/data/User/settings.json` — Cline + Continue settings
+- `~/.config/Code-Server/.../saoudrizwan.claude-dev/settings/cline_mcp_settings.json` — Cline MCP
+- `~/.continue/config.json` — Continue models + MCP
+- `~/.local/bin/zeschrome-mcp-bridge` — stdio↔HTTP MCP bridge for Cline
