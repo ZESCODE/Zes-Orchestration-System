@@ -35,19 +35,3 @@
 [16:04:06]   ✅ dashboard_v4.py
 [16:04:06]   ✅ dashboard_v3.py
 [16:04:06]   ✅ .codex/AGENTS.md
-[16:04:06]   ✅ Zes-System (127 files)
-[16:04:06]   ✅ Service status
-[16:04:06] ✅ Done: 134 files, 2.8M
-[16:16:55] 📸 Snapshot: 20260711_161654
-[16:16:55]   ✅ .9router/machine-id
-[16:16:55]   ✅ .9router/auth/cli-secret
-[16:16:55]   ⬜ .9router/config.yaml (not found)
-[16:16:55]   ✅ .claude.json
-[16:16:55]   ✅ .hermes/config.yaml
-[16:16:55]   ✅ .hermes/ecc-config.yaml
-[16:16:55]   ✅ dashboard_v4.py
-[16:16:55]   ✅ dashboard_v3.py
-[16:16:56]   ✅ .codex/AGENTS.md
-[16:16:56]   ✅ Zes-System (264 files)
-[16:16:56]   ✅ Service status
-[16:16:56] ✅ Done: 269 files, 5.6M
