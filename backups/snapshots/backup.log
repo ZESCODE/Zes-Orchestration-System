@@ -1,0 +1,14 @@
+[15:58:13] 📸 Creating snapshot: 20260711_155813
+[15:58:13]   ✅ machine-id
+[15:58:13]   ✅ auth/cli-secret
+[15:58:13]   ✅ db/data.sqlite
+[15:58:13]   ❌ config.yaml (not found)
+[15:58:13]   ❌ /data/data/com.termux/files/home/.claude.json (not found)
+[15:58:13]   ❌ /data/data/com.termux/files/home/.hermes/config.yaml (not found)
+[15:58:13]   ❌ /data/data/com.termux/files/home/.hermes/ecc-config.yaml (not found)
+[15:58:13]   ❌ /data/data/com.termux/files/home/dashboard_v4.py (not found)
+[15:58:13]   ❌ /data/data/com.termux/files/home/dashboard_v3.py (not found)
+[15:58:13]   ❌ /data/data/com.termux/files/home/.codex/AGENTS.md (not found)
+[15:58:13]   ✅ Zes-System repo archived
+[15:58:13]   📊 Service status snapshot:
+[15:58:14] ✅ Snapshot complete: 2 files, 732K → /data/data/com.termux/files/home/Zes-System/backups/snapshots/zes-20260711_155813
