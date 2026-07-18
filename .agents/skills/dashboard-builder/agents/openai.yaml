@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dashboard Builder"
+  short_description: "React + shadcn/ui + Tailwind v4 dashboards"
+  default_prompt: "I need to build a dashboard for monitoring services. Use the dashboard-builder skill."
