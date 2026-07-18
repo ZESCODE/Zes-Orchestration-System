@@ -1,343 +1,240 @@
-# ZES System — Complete System Documentation
+# ZES System — Unified Agent Instructions
 
-## Quick Reference
+**Version:** 3.5.0  
+**Scope:** This file governs all agents operating within the ZES (ZES Enterprise System) environment. It supersedes individual AGENTS.md files where conflicts exist.
+
+---
+
+## 1. System Overview
+
+ZES is a unified personal AI system running on Termux (Android). It orchestrates three primary agents — **Codex CLI**, **Hermes Agent**, and **Claude Code** — plus supporting services (9Router AI Gateway, amux Agent Control Plane, ZES Dashboard).
+
+```
+┌──────────────────────────────────────────────────────┐
+│                    ZES System                         │
+│                                                      │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐           │
+│  │  Codex   │  │  Hermes  │  │ Claude   │           │
+│  │  CLI     │  │  Agent   │  │  Code    │           │
+│  │ (coder)  │  │ (memory) │  │ (review) │           │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘           │
+│       │             │             │                  │
+│       └─────────┬───┴─────────────┘                  │
+│                 ▼                                     │
+│       ┌──────────────────┐                           │
+│       │  ZES Memory Hub   │  (unified memory)         │
+│       └──────────────────┘                           │
+│                                                      │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────────┐   │
+│  │ 9Router  │  │  amux    │  │ ZES Dashboard    │   │
+│  │ AI GW    │  │  Control │  │ (Vite + React)   │   │
+│  │ :20128   │  │  Plane   │  │ :5050             │   │
+│  └──────────┘  └──────────┘  └──────────────────┘   │
+└──────────────────────────────────────────────────────┘
+```
+
+### Architecture Principles
+
+1. **Codex is the primary coder** — Execution, planning, file editing, repo work
+2. **Claude Code is the secondary coder** — Code review, parallel tasks, multi-agent orchestration
+3. **Hermes is the memory hub & orchestrator** — All memories flow through ZESMemoryProvider
+4. **9Router is the AI gateway** — Routes all LLM requests, manages API keys
+5. **amux is the agent control plane** — Runs, monitors, and orchestrates parallel agent sessions
+6. **Skills are shared** — 81 skills across 14 categories, available to all agents
+7. **Services communicate via HTTP/WebSocket** — REST APIs, file-based bridges
+
+---
+
+## 2. The Trinity
+
+| Agent | Role | Saying | Config | Entry |
+|-------|------|--------|--------|-------|
+| **Codex** | Primary coder — the sharp scalpel | *"Unverified code is broken code"* | `~/.codex/AGENTS.md` | `npx codexapp` |
+| **Claude Code** | Secondary coder — the face | *"Code it right, test it clean"* | `~/.claude/AGENTS.md` | `claude` via amux |
+| **Hermes** | Orchestrator — the steady hand | *"I build to create continuity"* | `~/.hermes/soul.md` | r·sv hermes-gateway |
+
+---
+
+## 3. Component Roles
+
+### Codex CLI
+- **AGENTS.md:** `~/.codex/AGENTS.md` (v1.1.0)
+- **WORKFLOW.md:** `~/.codex/WORKFLOW.md` — 4-Phase QC workflow (Clarify → Plan → Implement → QC → Report)
+- **Skills:** 88 skill dirs (81 effective) at `~/.codex/skills/`
+- **MCP:** ZES Memory Hub bridge, GitHub, Context7, Exa, Playwright, Sequential Thinking
+- **Memory:** MCP-backed via `~/.zes/memory_hub.sqlite`
+- **Entry:** `npx codexapp` (port `:5900`) or direct CLI
+
+### Claude Code
+- **AGENTS.md:** `~/.claude/AGENTS.md` (v1.0.0)
+- **Runtime:** Node.js, routed through 9Router via `ANTHROPIC_BASE_URL=http://127.0.0.1:5905`
+- **Managed by:** amux for parallel sessions
+- **Memory:** Queries ZES Memory Hub via `zes-memory` CLI
+- **Settings:** `~/.claude/settings.json` — references AGENTS.md + memory context
+
+### Hermes Agent
+- **Soul:** `~/.hermes/soul.md` (v1.0.0) — custom ZES identity
+- **Config:** `~/.hermes/config.yaml` — routes 100% through 9Router
+- **Version:** 0.18.2
+- **Dashboard:** `:9119`
+- **Memory provider:** holographic → `~/.zes/memory_hub.sqlite`
+- **Cron:** Memory sync every 30 min
+
+### 9Router AI Gateway
+- **Path:** `~/9router/`
+- **Port:** `:20128` (OpenAI-compatible endpoint)
+- **Providers:** OpenAI, Anthropic, Groq, DeepSeek, Gemini, and 30+ more
+- **Config:** `~/9router/.env`, `~/9router/data/`
+
+### amux Agent Control Plane
+- **Path:** `~/amux-fresh/`
+- **Port:** `:8822` (web dashboard)
+- **Config:** `~/.amux/config.yaml`
+- **Projects:** zes-system, workspace, claude-code, codex
+- **Features:** Self-healing watchdog, kanban board, session management
+
+### ZES Dashboard
+- **Stack:** React 19 + shadcn/ui + Vite 8 + Tailwind CSS v4
+- **Port:** `:5050` (Vite dev server)
+- **Source:** `~/zes-system-v2/`
+- **Backend:** Flask API on `:5002` (runit: `zes-flask-api`)
+- **Pages:** Dashboard, Processes, System, Services, Skills Manager, Hermes Chat, 9Router, Design Studio, Kanban, Claude, Architecture
+
+---
+
+## 4. Unified Memory Architecture
+
+### Memory Stores
+
+| Store | Location | Type | Agent Access |
+|-------|----------|------|-------------|
+| ZES Memory Hub | `~/.zes/memory_hub.sqlite` | SQLite + FTS5 | All agents (primary) |
+| Codex MCP Memory | `~/.zes/memory_hub.sqlite` | via MCP bridge | Codex CLI |
+| Codex raw memories | `~/.codex/memories/raw_memories.md` | Markdown | Codex CLI |
+| Hermes native | `~/.hermes/MEMORY.md` | Markdown | Hermes |
+| amux transcripts | `~/.amux/transcripts/` | JSONL | amux sessions |
+| Claude Code projects | `~/.claude/projects/*/CLAUDE.md` | Markdown | Claude Code |
+
+### Sync Flow
+
+```
+Codex CLI ──zes-memory-sync (daemon)──→ ZES Memory Hub ←── Hermes (holographic)
+    │                                            │
+    └── MCP bridge server ──────────────────────┘
+         (memory_write, memory_search, etc.)
+```
+
+### CLI Usage
+```bash
+zes-memory status       # Hub health & count
+zes-memory list 20      # Recent memories
+zes-memory search <q>   # FTS5 full-text search
+zes-memory write <txt>  # Write memory entry
+```
+
+---
+
+## 5. Port & Service Reference
+
+| Service | Port | Status | Managed By |
+|---------|------|--------|------------|
+| ZES Dashboard (Vite) | `:5050` | ✅ | runit (zes-dashboard) |
+| Flask API | `:5002` | ✅ | runit (zes-flask-api) |
+| 9Router AI Gateway | `:20128` | ✅ | runit (9router-proxy) |
+| amux Control Plane | `:8822` | ✅ | runit (amux) |
+| Hermes Dashboard | `:9119` | ✅ | runit (hermes-dashboard) |
+| Hermes Gateway | — | ✅ | runit (hermes-gateway) |
+| Claude Proxy | `:5905` | ✅ | runit (claude-proxy) |
+| Control Center | `:8083` | ✅ | legacy |
+| ZES Memory Sync | — | ✅ | runit (zes-memory-sync) |
+| ttyd web terminal | `:7173` | ✅ | runit |
+
+### Provider Chain
+```
+All agents ──→ 9Router (:20128) ──→ LLM providers (OpenAI, Anthropic, Groq, etc.)
+Claude Code ──→ 9Router (:5905 proxy) ──→ Anthropic
+Hermes ──→ 9Router (:20128/v1) ──→ gpt-4o-mini / claude-sonnet / deepseek
+```
+
+---
+
+## 6. Skills
+
+**81 skills across 14 categories** at `~/.codex/skills/`. Shared across all agents.
+
+| Category | Count | Skills |
+|----------|-------|--------|
+| ZES | 29 | agentic-core, brainstorming, dashboard, design, memory-ops, provider-manager, etc. |
+| Core Workflow | 8 | tdd-workflow, verification-loop, coding-standards, error-handling, ecc-integration, etc. |
+| Backend | 8 | backend-patterns, api-design, fastapi-patterns, postgres-patterns, python-patterns, etc. |
+| Integration | 6 | composio-cli, flightclaw, search-codex-chats, telegram-bridge, 9router, etc. |
+| Frontend | 6 | frontend-patterns, react-patterns, react-performance, vite-patterns, dashboard-builder, etc. |
+| Project Workflow | 5 | plan-orchestrate, delivery-gate, context-budget, cost-tracking, repo-scan |
+| Security | 4 | security-review, security-scan, gateguard, safety-guard |
+| Testing & QA | 4 | browser-qa, python-testing, e2e-testing, benchmark |
+| Research | 3 | deep-research, documentation-lookup, exa-search |
+| System | 2 | imagegen, system-orchestrator |
+| Agent | 2 | agentic-engineering, knowledge-ops |
+| Discovery | 2 | skill-scout, skill-stocktake |
+| Design | 1 | designmd |
+| Free AI | 1 | freellm |
+
+---
+
+## 7. Service Management (runit)
 
 ```bash
-zes status          # all services + health
-zes health          # run 20 test suite  
-zes mcp list        # list MCP bridge tools
-zes backup          # snapshot configs
-zes restore         # restore from backup
-zes restart <svc>   # restart service
-zes logs <svc>      # tail logs (20 lines)
-zes dashboard       # show dashboard URL
-zes-scan            # security hardening scan
-zes-backup list     # list snapshots
+sv start/stop/restart/status zrouter-proxy     # 9Router (:20128)
+sv start/stop/restart/status zes-flask-api     # Flask API (:5002)
+sv start/stop/restart/status zes-dashboard     # Vite Dashboard (:5050)
+sv start/stop/restart/status amux              # amux Control Plane (:8822)
+sv start/stop/restart/status hermes-gateway    # Hermes gateway
+sv start/stop/restart/status hermes-dashboard  # Hermes WebUI (:9119)
+sv start/stop/restart/status zes-memory-sync   # Memory hub sync
 ```
 
-## System Status (20/20 tests passing, 8/8 health evals — 100%)
-
-| Service | Port | Status | Details |
-|---------|------|--------|---------|
-| **9Router** | 20128 | ✅ | 18 providers (9 active) — routes to GitHub Copilot, Groq, Cerebras, Mistral, OpenRouter, Cloudflare, Gemini, DeepSeek, NVIDIA NIM, Anthropic |
-| **Dashboard v4** | 8083 | ✅ | SSE real-time · Drawer nav · Provider model names · MCP panel · Audit log · Terminal iframe · Mobile-optimized (responsive 768px/480px) |
-| **Hermes** | — | ✅ | Gateway · 10 cron jobs · MCP layer |
-| **Claude Code** | CLI/:5905 | ✅ | v2.1.207 via proot-distro Debian — 6 MCP servers, 31 skills, 16 agents, 9 hooks · 9Router proxy |
-| **Claude Proxy** | 5905 | ✅ | 9Router-proxied endpoint for Claude Code API |
-| **Codex** | 5900 | ✅ | AI API proxy |
-| **VS Code Server** | 8000 | ✅ | Web VS Code with Cline + Continue |
-| **VS Code Mobile** | 8001 | ✅ | Mobile-optimized VS Code |
-| **ttyd** | 7173 | ✅ | Web terminal |
-| **Tor** | 9050 | ✅ | SOCKS5 proxy pool |
-| **zesChrome MCP** | 5901 | ✅ | 18 tools — browser automation + ZES system tools |
-| **ZES Bridge MCP** | stdio | ✅ | 10 tools — dashboard, 9Router, services, Tor control |
-| **Agent UI** | 8084 | ✅ | ZES-aware chat · 12 tools · persistent memory · system knowledge base |
-| **Swarm** | 5030 | ✅ | Multi-agent orchestrator |
-| **Agent Dashboard API** | 8002 | ✅ | REST API |
-| **Agent Dashboard Web** | 8003 | ✅ | Frontend |
-| **Cloudflare Tunnel** | — | ✅ | Remote access |
-| **Composio CLI** | — | ✅ | Gmail + 1000+ API integrations |
-
-## MCP Layer — 6 Servers
-
-Configured in `~/.claude.json`:
-
-| Server | Tools | Type | Description |
-|--------|-------|------|-------------|
-| **zeschrome** | 18 | Node stdio (:5901) | Browser automation via CDP + system tools |
-| **zes-bridge** | 10 | Node stdio | Dashboard, 9Router, services, Tor control |
-| **chrome-devtools** | 8 | npx | Browser debugging protocol |
-| **filesystem** | 5 | npx | File operations on workspace |
-| **memory** | 3 | npx | Persistent session memory |
-| **sequential-thinking** | 2 | npx | Chain-of-thought reasoning |
-
-## Security Hooks — 9 Active
-
-| Hook | File | Purpose |
-|------|------|---------|
-| config-protection | `hooks/config-protection.js` | Prevents unauthorized config edits |
-| gateguard-fact-force | `hooks/gateguard-fact-force.js` | Security gate enforcement |
-| mcp-health-check | `hooks/mcp-health-check.js` | MCP server health verification |
-| governance-capture | `hooks/governance-capture.js` | Audit trail capture |
-| insaits-security-monitor | `hooks/insaits-security-monitor.py` | Python-based security monitoring |
-| insaits-security-wrapper | `hooks/insaits-security-wrapper.js` | JS security wrapper |
-
-## Skills — 31
-
-**Core (21):** zes-testing, zes-autoreview, zes-security-review, zes-bugfix-sweep, zes-dev-patterns, zes-tdd-workflow, zes-mcp-patterns, zes-agent-debugging, zes-verification, zes-evals, zes-research, zes-changelog, zes-heap-leaks, zes-performance, zes-transcript, openclaw-debugging, technical-documentation, gitcrawl-z, gitcrawl-zes, zes-refactor-docs, zes-security-triage
-
-**ECC-imported (10):** zes-plan-canvas, zes-coding-standards, zes-backend-patterns, zes-documentation-lookup, zes-frontend-patterns, zes-e2e-testing, zes-benchmark-methodology, zes-strategic-compact, zes-product-capability, zes-agent-introspection-debugging
-
-## Agents — 16
-
-planner, architect, code-reviewer, tdd-guide, security-reviewer, spec-miner, python-reviewer, typescript-reviewer, build-error-resolver, harness-optimizer, e2e-runner, performance-optimizer, loop-operator, code-architect, silent-failure-hunter, doc-updater
-
-## Backup System
-
-- `zes-backup snapshot` — snapshots `.9router/`, `.claude.json`, `.hermes/`, `dashboard_v4.py`, `Zes-System/` repo
-- `zes-backup list` — lists all snapshots
-- `zes-backup restore` — restore from latest snapshot
-- Auto-committed to Zes-System git, Hermes cron daily at 04:00
-
-## Dashboard v4 Features
-
-![Dashboard on :8083]
-- **Real-time SSE push**: services (3s), MCP (5s), providers (10s), env stats
-- **Left drawer nav**: service status dots · quick links (9Router, VS Code, ttyd, Codex, Agent UI) · system actions (Claude Code terminal, Tor rotate, health evals)
-- **Provider heat map**: active/unavailable/error status dots · model info from `modelLock_*` keys · auth type + proxy info
-- **MCP server status panel**: alive/dead indicators · tool counts · command display
-- **Hook audit log**: auto-refresh 5s · governance event feed
-- **ttyd terminal iframe**: embedded web terminal
-- **Mobile-optimized**: 480px + 768px breakpoints · swipe gestures · single-column grids · compact cards
-
-## 9Router — 18 Providers
-
-**OAuth**: GitHub Copilot, Cline, Codex (OpenAI), Gemini CLI, Qoder, Kiro
-**API Key**: NVIDIA NIM, Groq, Gemini, DeepSeek, Cerebras, OpenRouter, Anthropic, Cloudflare AI, Mistral AI
-
-### OpenAI-Compatible Nodes
-| Prefix | Endpoint | Proxy |
-|--------|----------|-------|
-| `gm` | generativelanguage.googleapis.com/v1beta/openai | Direct |
-| `nv` | integrate.api.nvidia.com/v1 | Direct |
-| `he` | :8787 | Tor |
-| `oc` | :4040/v1 | Tor |
-
-## Claude Code Config
-
-- **6 MCP servers**: zeschrome, zes-bridge, chrome-devtools, filesystem, memory, sequential-thinking
-- **3 hooks**: config-protection, gateguard-fact-force, mcp-health-check
-- **31 skills** in `~/.claude/plugins/ecc/skills/`
-- **API key**: cleared (uses 9Router routing)
-
-## Agent UI (:8084) — Control Panel
-
-- **12 ZES system tools**: get_system_status, run_health_evals, run_backup, get_providers, run_security_scan, check_service, list_services, restart_service, get_service_logs, get_mcp_status, rotate_tor, get_claude_code_info
-- **Persistent memory**: stores conversation summaries, learned facts, user preferences
-- **ZES knowledge base**: full system architecture documentation served to LLM
-- **Toolbar**: 6 quick-action buttons (Status, Health, Backup, Providers, Security, Memory)
-- **Mobile-optimized**: toolbar integrated into `#app` flex container for visibility
-
-## New Tools (v4.1)
-
-| Tool | Command | Description |
-|------|---------|-------------|
-| **Agent Orchestration Pipeline** | `zes pipeline` | Runs tasks through Planner→Architect→Coder→Reviewer→Tester with status tracking |
-| **Security Supply Chain Scanner** | `zes scan` | Scans npm/pip deps, credentials, permissions, config leaks |
-| **Session Kanban** | `zes kanban` | Persistent task board linked to agent conversations via REST API |
-| **Cross-Harness Deployer** | `zes deploy` | Export ZES agents to Cursor, Gemini, CodeBuddy formats |
-| **Dashboard Plugin Framework** | `zes plugins` | MCP servers register widgets via POST `/api/plugins/register` |
-
-## Dashboard Plugin Framework
-
-Any MCP server can register itself as a dashboard plugin:
+## 8. Common Commands
 
 ```bash
-python3 ~/Zes-System/scripts/zes-plugin-register \
-  "My Plugin" "1.0" "Description" \
-  '[{"id":"main","name":"My Widget"}]' \
-  '{"main":"http://localhost:8083/"}'
-```
+# Health
+curl http://127.0.0.1:5002/api/health      # System health
+curl http://127.0.0.1:5002/api/system      # System info
+curl http://127.0.0.1:5002/api/services    # All services
+curl http://127.0.0.1:5002/api/skills      # All skills (81)
 
-Auto-registered on dashboard startup:
-- Agent Orchestration Pipeline (2 widgets)
-- Security Supply Chain Scanner (2 widgets)
-- Session Kanban (1 widget)
-- Cross-Harness Deployer (1 widget)
+# Memory
+zes-memory status
+zes-memory list 20
+zes-memory search <query>
 
-## Kanban REST API
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/kanban/tasks` | List all tasks grouped by column |
-| POST | `/api/kanban/tasks` | Create task `{title, description, source, conversationId}` |
-| POST | `/api/kanban/tasks/:id/move` | Move task `{column: backlog\|in-progress\|review\|done}` |
-| POST | `/api/kanban/tasks/:id/link` | Link conversation `{conversationId}` |
-
-## File Structure (Updated)
-
-```
-~/
-├── dashboard_v4.py              — Dashboard v4 (SSE + REST + Plugin Framework)
-├── Zes-System/
-│   ├── AGENTS.md                — This file
-│   ├── scripts/
-│   │   ├── orchestrate-pipeline.js  — [NEW] Agent pipeline runner
-│   │   ├── security-supply-chain-scan.py — [NEW] Supply chain security scanner
-│   │   ├── deploy-agent.js          — [NEW] Cross-harness agent deployer
-│   │   ├── register-system-plugins.py — [NEW] Auto-register plugins
-│   │   └── zes-cli.sh               — [UPDATED] New commands: pipeline, scan, kanban, deploy, plugins
-│   ├── services/agent-ui/
-│   │   ├── kanban-store.js          — [NEW] Persistent kanban task store
-│   │   └── agent-server.js          — [UPDATED] Kanban API routes
-│   └── scripts/zes-plugin-register  — [NEW] Plugin registration helper
-```
-
-## Architecture (Updated)
-
-```
-You (NL) → Codex (superpowers) → 9Router (:20128) → Models
-                                        ↘
-                              Hermes · VS Code · Agent UI (:8084) · Dashboard (:8083)
-                                        ↘             ↓
-                              zesChrome MCP (:5901) · ZES Bridge MCP (stdio)
-                                        ↘             ↓
-                              Headless Chrome (:9222) → Browser Control
-                                                         ↓
-                              ┌── Dashboard Plugin Framework ──────┐
-                              │ → Orchestration Pipeline (zes pipeline)
-                              │ → Security Scanner (zes scan)
-                              │ → Session Kanban (zes kanban)
-                              │ → Cross-Harness Deployer (zes deploy)
-                              └────────────────────────────────────┘
-```
-
-## Architecture
-
-```
-You (NL) → Codex (superpowers) → 9Router (:20128) → Models
-                                        ↘
-                              Hermes · VS Code (Cline/Zed) · Agent UI (:8084)
-                                        ↘
-                              zesChrome MCP (:5901) · ZES Bridge MCP (stdio)
-                                        ↘
-                              Headless Chrome (:9222) → Browser Control
-```
-
-## Common Commands
-
-```bash
-# Service management
-sv status /data/data/com.termux/files/usr/var/service/*
-sv restart <name>
-
-# 9Router API
-TOKEN=$(python3 -c "import hashlib;d=open('$HOME/.9router/machine-id').read().strip();s=open('$HOME/.9router/auth/cli-secret').read().strip();print(hashlib.sha256((d+'9r-cli-auth'+s).encode()).hexdigest()[:16])")
-curl -H "x-9r-cli-token: $TOKEN" http://localhost:20128/api/providers
+# Agents
+npx codexapp            # Codex app-server (:5900)
+claude                  # Claude Code (via amux for parallel)
+sv restart hermes-gateway  # Restart Hermes
 
 # Dashboard
-curl -s http://localhost:8083/api/status
-
-# Health checks
-zes health
-zes-scan
+http://127.0.0.1:5050   # ZES Dashboard (Vite)
+http://127.0.0.1:8822   # amux Control Plane
+http://127.0.0.1:9119   # Hermes Dashboard
+http://127.0.0.1:8083   # Control Center (legacy)
 ```
 
-## File Structure
+## 9. Key Paths
 
-```
-~/
-├── dashboard_v4.py              — Dashboard v4 (SSE + REST, 876 lines)
-├── dashboard_v3.py              — v3 backup
-├── .claude.json                 — 6 MCP servers + 3 hooks
-├── .claude/                     — Claude Code local data
-├── .9router/                    — 9Router config + auth
-├── .hermes/                     — Hermes gateway config
-├── Zes-System/                  — System repo
-│   ├── AGENTS.md                — This file
-│   ├── README.md
-│   ├── scripts/
-│   │   ├── zes-cli.sh           — ZES CLI entry
-│   │   ├── run-tests.py         — 20-test suite
-│   │   ├── run-evals.py         — 8 health evals
-│   │   ├── health-check.sh
-│   │   ├── security-scan.sh
-│   │   └── hooks/               — 6 security hooks
-│   ├── services/
-│   │   └── agent-ui/            — Agent control panel
-│   │       ├── agent-server.js  — Server (12 tools)
-│   │       ├── index.html       — Chat UI (toolbar in #app)
-│   │       ├── memory-store.js  — Persistent memory
-│   │       └── zes-knowledge.json — System knowledge base
-│   ├── zes-chrome/
-│   │   ├── mcp-server/          — zeschrome MCP (18 tools)
-│   │   ├── zes-bridge-mcp/      — ZES Bridge MCP (10 tools)
-│   │   └── ...                  — Chrome extension
-│   ├── docs/
-│   │   ├── infrastructure/
-│   │   ├── services/
-│   │   ├── providers/
-│   │   ├── agents/
-│   │   └── guides/
-│   ├── .agents/
-│   │   ├── skills/              — 31 skills
-│   │   └── agents/              — 16 agents
-│   └── backups/
-│       ├── scripts/             — Backup/restore scripts
-│       └── snapshots/           — Timestamped config snapshots
-├── .config/claude/claude.json — Claude Code config (archived)
-├── .ecc/                        — ECC cross-harness config (imported agents/skills)
-├── .nimbalyst/                  — Nimbalyst monorepo (reference)
-└── .local/bin/zes               → Zes-System/scripts/zes-cli.sh
-```
-
-## Recent Fixes (2026-07-11)
-
-### :8084 — ZES Tool Bar moved to Drawer
-- **Problem**: `.zes-tool-bar` div was a standalone bar rendering System Tools buttons (📊 🏥 💾 🔌 🛡️ 🧠) between the toolbar and sessions panel, duplicating what was already in the left drawer nav.
-- **Fix**: Removed the duplicate standalone bar. All System Tools are now exclusively in the left drawer under "System Tools" section.
-- **Files changed**: `services/agent-ui/index.html` (removed CSS, HTML, updated badge JS)
-- **Old server.js**: Removed (hardcoded API key, replaced by agent-server.js)
-
----
-
-## Codex Orchestrator Layer
-
-Codex is the **NL orchestrator** for ZES. It understands user intent and delegates to the right backend.
-
-```
-Codex (NL Orchestrator) ──┬── proot-distro → Claude Code (deep coding)
-                           ├── hermes CLI → Hermes Gateway (cron, messaging)
-                           ├── sv → runsv services (system control)
-                           └── curl → Dashboard + 9Router API (monitoring)
-```
-
-### Quick Reference for Codex
-
-| Action | Command |
-|--------|---------|
-| Delegate coding to Claude Code | `proot-distro login debian -- bash -c 'ANTHROPIC_BASE_URL=http://127.0.0.1:5905 ANTHROPIC_API_KEY=sk-ant-anything claude -p "task" --bare --allowedTools "Bash,Read,Write,Edit"` |
-| Schedule Hermes cron | `hermes cron create --name "job" --prompt "..." --schedule "every 60m"` |
-| Check services | `sv status /data/data/com.termux/files/usr/var/service/*` |
-| Restart service | `sv restart /data/data/com.termux/files/usr/var/service/<name>` |
-| 9Router providers | `curl -H "x-9r-cli-token: $TOKEN" http://localhost:20128/api/providers` |
-
-### Skills
-
-- `~/.codex/skills/zes-orchestrator/` — Full orchestrator skill with delegation scripts
-- `~/.codex/skills/zes-system/` — ZES system operational knowledge
-
----
-
-## 9. Memory Hub — Vector Search (v3.5.0)
-
-### Search Modes
-
-| Mode | API Param | Backend | Use Case |
-|------|-----------|---------|----------|
-| Full-text | `mode=fts5` | SQLite FTS5 | Exact keyword matches |
-| Vector | `mode=vector` | TF-IDF + cosine similarity | Semantic similarity |
-| Hybrid | `mode=hybrid` | Reciprocal Rank Fusion | Best overall relevance |
-
-### Quick Start
-
-```bash
-# Search with different modes
-zes-memory search --mode vector "coding agent"
-zes-memory search --mode hybrid "memory system"
-
-# Reindex embeddings after adding memories
-zes-memory reindex
-
-# API
-curl "/api/zes/memory/search?q=agent&mode=vector"
-curl -X POST "/api/zes/memory/reindex"
-```
-
-### Architecture
-
-- **TF-IDF Vectorizer** — Pure Python, no external dependencies
-- **Extensible** — Swap in 9Router embeddings or sqlite-vec when available
-- **Auto-indexing** — Embeddings computed on write, reindexable on demand
-
-See [`docs/memory-hub-vector-search.md`](docs/memory-hub-vector-search.md) for full documentation.
+| Resource | Path |
+|----------|------|
+| ZES Dashboard Source | `~/zes-system-v2/` |
+| Codex Config | `~/.codex/config.toml` |
+| Codex AGENTS.md | `~/.codex/AGENTS.md` |
+| Codex WORKFLOW.md | `~/.codex/WORKFLOW.md` |
+| Codex Skills | `~/.codex/skills/` (81 skills) |
+| Claude Code AGENTS.md | `~/.claude/AGENTS.md` |
+| Hermes Source | `~/hermes-agent-full/` |
+| Hermes Config | `~/.hermes/config.yaml` |
+| Hermes Soul | `~/.hermes/soul.md` |
+| ZES Memory Hub DB | `~/.zes/memory_hub.sqlite` |
+| ZES Memory CLI | `~/.local/bin/zes-memory` |
+| amux Source | `~/amux-fresh/` |
+| amux Config | `~/.amux/config.yaml` |
+| 9Router | `~/9router/` |
+| Credentials | `~/.secure-credentials/master.env` |

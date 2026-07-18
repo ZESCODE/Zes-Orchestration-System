@@ -100,12 +100,12 @@ proot-distro login debian -- cmdop machines  # List fleet machines
 
 **Config (inside proot):** `/root/.config/cmdop/config.yaml`
 
-## OpenClaw SDK
+## Claude Code SDK
 
-OpenClaw is an open-source agent orchestration plugin (thin wrapper around CMDOP Python SDK).
+Claude Code is an open-source agent orchestration plugin (thin wrapper around CMDOP Python SDK).
 
 **Version:** 2026.3.20
-**Import:** `from openclaw import OpenClaw`
+**Import:** `from codex_cli import Codex`
 
 ## 9Router as AI Gateway
 

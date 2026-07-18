@@ -6,7 +6,7 @@
  */
 import express from "express";
 import { createServer } from "http";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, readdirSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { execSync } from "child_process";
@@ -117,6 +117,37 @@ app.get("/api/hermes/status", (req, res) => {
     sessions: run("ls ~/.hermes/webui/sessions/*.json 2>/dev/null | wc -l") || "0",
     config: existsSync(join(HOME, ".hermes/config.yaml"))
   });
+});
+
+// ─── API: Hermes Agents ──────────────────────────────────────────
+app.get("/api/hermes/agents", (req, res) => {
+  try {
+    const agentsDir = join(HOME, "Zes-System/.agents/agents");
+    if (!existsSync(agentsDir)) { return res.json([]); }
+    const files = readdirSync(agentsDir).filter(f => f.endsWith(".md"));
+    const agents = files.map(f => {
+      const content = readFileSync(join(agentsDir, f), "utf8").slice(0, 500);
+      const name = (content.match(/^name:\s*(.+)/m) || [,""])[1].trim() || f.replace(".md","");
+      const desc = (content.match(/^description:\s*(.+)/m) || [,""])[1].trim() || "";
+      const model = (content.match(/^model:\s*(.+)/m) || [,""])[1].trim() || "auto";
+      const tools = (content.match(/^tools:\s*\[(.+)\]/m) || [,""])[1].split(",").map(t => t.trim().replace(/"/g,"")) || [];
+      return { id: name, name, description: desc, model, tools, status: "idle", last_run: null };
+    });
+    res.json(agents);
+  } catch(e) { res.json([]); }
+});
+
+// ─── API: Run Agent ───────────────────────────────────────────────
+app.post("/api/hermes/agent/:id/run", (req, res) => {
+  const { id } = req.params;
+  try {
+    const safeId = id.replace(/[^a-zA-Z0-9_-]/g, "");
+    const agentFile = join(HOME, "Zes-System/.agents/agents/" + safeId + ".md");
+    if (!existsSync(agentFile)) return res.status(404).json({ error: "Agent not found" });
+    const cmd = `ANTHROPIC_BASE_URL=http://127.0.0.1:5905 ANTHROPIC_API_KEY=sk-ant-anything proot-distro login debian -- claude -p "Run agent: ${safeId}" --allowedTools "Bash,Read,Write,Edit" 2>&1 &`;
+    const out = run(cmd, 5000);
+    res.json({ result: "Agent run started", output: out.slice(0, 200) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── API: Hermes Providers ──────────────────────────────────────────

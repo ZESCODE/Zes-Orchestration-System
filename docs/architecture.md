@@ -1,10 +1,10 @@
 # ZES System Architecture (v4.0)
 
-*Generated: 2026-07-14T10:03:51.839206*
+*Generated: 2026-07-14T10:06:23.159289*
 
 ## Overview
 
-- **27 services** across 3 repos
+- **28 services** across 3 repos
 - **6 data flows** between services
 
 ## Services
@@ -29,6 +29,7 @@
 | hermes-webui | service | javascript | server.js |
 | r9 | runsv | unknown | N/A |
 | socat | runsv | unknown | N/A |
+| topology-3d | service | javascript | server.js |
 | tor | runsv | unknown | N/A |
 | ttyd | runsv | unknown | N/A |
 | vscode-mobile | service | javascript | server.js |
