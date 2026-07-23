@@ -38,6 +38,10 @@ case "${1:-help}" in
     shift
     exec python3 "$HOME/.local/bin/zes-design" "$@"
     ;;
+  integrate|it)
+    shift
+    exec python3 "$HOME/.local/bin/zes-integrate" "$@"
+    ;;
   --check|-c|check)
     echo "=== Research Providers ==="
     python3 "$RESEARCH_ENGINE" --check

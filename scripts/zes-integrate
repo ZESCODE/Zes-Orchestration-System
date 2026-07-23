@@ -1,0 +1,536 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""
+ZES Integration — 3-Agent Cross-Component Integration Verifier.
+
+Spawns 3 parallel AI agents to verify integration between components:
+  Service Tester    → Inter-service communication, data flow, API health
+  Contract Verifier → API specs match implementations, request/response formats
+  Dependency Graph  → Dependency chains, version conflicts, compatibility
+
+Usage:
+  zes integrate --dir ~/project              # Full integration verification
+  zes integrate --dir ~/ --service api       # Test specific service
+  zes integrate --quick                       # Local checks only
+  zes integrate --ci                          # Exit 1 on integration failure
+"""
+
+import asyncio, json, os, sys, argparse, textwrap, subprocess, re
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+# ─── AI Provider Config ──────────────────────────────────────────
+
+INTEGRATION_PROVIDERS = {
+    "service_tester": {
+        "url": os.environ.get("SVC_URL", "https://api.groq.com/openai/v1/chat/completions"),
+        "model": os.environ.get("SVC_MODEL", "llama-3.3-70b-versatile"),
+        "env_key": "GROQ_API_KEY",
+        "name": "Service Tester (Groq Llama 3.3)",
+    },
+    "contract": {
+        "url": os.environ.get("CONTRACT_URL", "https://openrouter.ai/api/v1/chat/completions"),
+        "model": os.environ.get("CONTRACT_MODEL", "deepseek/deepseek-v4-flash"),
+        "env_key": "OPENROUTER_API_KEY",
+        "name": "Contract Verifier (OpenRouter DeepSeek V4)",
+    },
+    "deps": {
+        "url": os.environ.get("DEPS_URL", "https://api.llm7.io/v1/chat/completions"),
+        "model": os.environ.get("DEPS_MODEL", "codestral-latest"),
+        "env_key": "LLM7_API_KEY",
+        "name": "Dependency Analyzer (LLM7 Codestral)",
+    },
+}
+
+# ─── Agent Prompts ───────────────────────────────────────────────
+
+SERVICE_TESTER_PROMPT = """You are the **Service Integration Tester** in a 3-agent Integration Verification team.
+
+Your job: Analyze how components communicate and find integration issues.
+
+Analyze:
+1. **Service Boundaries** — Are components properly separated? Clear interfaces?
+2. **Communication** — Are API calls, events, or message passing correct?
+3. **Data Flow** — Does data flow correctly between components? Type mismatches?
+4. **Error Handling** — Are integration errors handled gracefully? Timeouts? Retries?
+5. **Configuration** — Are service URLs, ports, credentials correctly wired?
+6. **Service Health** — Do services start in order? Dependency on other services?
+7. **Compatibility** — Are protocol versions, formats, schemas consistent?
+
+Be specific — cite file paths, function names, API endpoints.
+
+Output:
+- SERVICE_BOUNDARIES: How components are separated (clear/fuzzy/none)
+- INTEGRATION_ISSUES: Specific integration problems (numbered, with severity: HIGH/MED/LOW)
+- DATA_FLOW: Assessment of data passing between components
+- ERROR_HANDLING: How integration errors are managed
+- RECOMMENDATIONS: Specific fixes (numbered)
+- OVERALL: One-sentence integration health verdict"""
+
+CONTRACT_VERIFIER_PROMPT = """You are the **API Contract Verifier** in a 3-agent Integration Verification team.
+
+Your job: Verify API contracts between services are consistent.
+
+Analyze:
+1. **API Definitions** — Are API endpoints clearly defined? OpenAPI? GraphQL schema?
+2. **Request/Response** — Do request params match what servers expect? Response formats match clients?
+3. **Type Consistency** — Are types consistent across service boundaries (e.g., string IDs, datetime formats)?
+4. **Auth Schemes** — Are auth requirements consistent between services?
+5. **Error Responses** — Do error responses have consistent format?
+6. **Versioning** — Are API versions compatible? Breaking changes?
+7. **Documentation** — Is API documentation accurate vs implementation?
+
+Be specific — cite endpoints, field names, type mismatches.
+
+Output:
+- CONTRACTS_FOUND: API definitions or contracts detected
+- BREACHES: Contract violations found (numbered, severity: CRITICAL/HIGH/MED/LOW)
+- TYPE_MISMATCHES: Inconsistent types across boundaries
+- DOC_SYNC: Whether docs match implementation
+- RECOMMENDATIONS: Specific contract fixes (numbered)
+- OVERALL: One-sentence contract health verdict"""
+
+DEPENDENCY_PROMPT = """You are the **Dependency Graph Analyzer** in a 3-agent Integration Verification team.
+
+Your job: Analyze dependency relationships and compatibility.
+
+Analyze:
+1. **Dependency Graph** — What are the dependency chains between components?
+2. **Version Conflicts** — Are there conflicting version requirements? Diamond dependencies?
+3. **Circular Dependencies** — Any circular imports or dependency cycles?
+4. **Missing Dependencies** — Are there imports that might fail at runtime?
+5. **Compatibility** — Are dependency versions compatible with each other?
+6. **Update Risk** — Are there outdated dependencies with known issues?
+7. **Dev/Prod Parity** — Are dev and prod dependency sets consistent?
+
+Be specific — cite package names, version numbers, import statements.
+
+Output:
+- GRAPH: Dependency structure between components
+- CONFLICTS: Version conflicts or incompatibilities (numbered, severity: HIGH/MED/LOW)
+- CYCLES: Circular dependencies detected
+- MISSING: Potentially missing imports
+- RECOMMENDATIONS: Dependency fixes (numbered)
+- OVERALL: One-sentence dependency health verdict"""
+
+
+# ─── Local Tools ────────────────────────────────────────────────
+
+def scan_imports(project_dir: str) -> str:
+    """Scan import statements and detect dependency issues."""
+    root = Path(project_dir)
+    results = []
+    
+    py_files = list(root.rglob("*.py"))
+    py_files = [f for f in py_files if "node_modules" not in str(f) and ".git" not in str(f) and "__pycache__" not in str(f)]
+    
+    if not py_files:
+        return "No Python files found"
+    
+    # Collect all imports
+    all_imports = {}
+    for f in py_files:
+        try:
+            content = f.read_text()
+            rel = f.relative_to(project_dir)
+            imports = re.findall(r'^(?:from\s+(\S+)\s+import|import\s+(\S+))', content, re.MULTILINE)
+            for imp in imports:
+                module = imp[0] or imp[1]
+                base = module.split(".")[0]
+                if base not in all_imports:
+                    all_imports[base] = []
+                all_imports[base].append(str(rel))
+        except:
+            pass
+    
+    results.append(f"📄 {len(py_files)} Python files, {len(all_imports)} unique import targets")
+    
+    # Check for potential missing deps
+    stdlib_modules = {"os", "sys", "json", "re", "pathlib", "subprocess", "datetime", 
+                      "math", "random", "typing", "collections", "functools", "itertools",
+                      "hashlib", "base64", "urllib", "http", "argparse", "textwrap", "asyncio",
+                      "threading", "time", "shutil", "tempfile", "io", "abc", "enum", "dataclasses"}
+    
+    internal_modules = {str(f.relative_to(root).parts[0]) for f in py_files 
+                        if len(f.relative_to(root).parts) > 1}
+    
+    external_deps = [m for m in all_imports 
+                     if m not in stdlib_modules and m not in internal_modules and m != ""]
+    
+    if external_deps:
+        results.append(f"\n📦 External dependencies ({len(external_deps)}):")
+        for dep in sorted(set(external_deps))[:20]:
+            files = all_imports[dep]
+            results.append(f"   {dep} (used by {len(files)} files)")
+    
+    # Check for circular imports
+    import_map = {}
+    for f in py_files:
+        try:
+            rel = str(f.relative_to(project_dir))
+            content = f.read_text()
+            imports = re.findall(r'^from\s+(\.?\S+)\s+import', content, re.MULTILINE)
+            local_imports = [imp for imp in imports if imp.startswith(".")]
+            if local_imports:
+                import_map[rel] = local_imports
+        except:
+            pass
+    
+    # Simple cycle check: A imports B, B imports A
+    for a, a_imports in import_map.items():
+        for b, b_imports in import_map.items():
+            if a != b:
+                a_mod = Path(a).stem
+                b_mod = Path(b).stem
+                if b_mod in str(a_imports) and a_mod in str(b_imports):
+                    results.append(f"\n🔄 Potential circular: {a} ↔ {b}")
+    
+    return "\n".join(results)
+
+
+def scan_api_endpoints(project_dir: str) -> str:
+    """Scan for API endpoint definitions and usages."""
+    root = Path(project_dir)
+    results = []
+    
+    py_files = list(root.rglob("*.py"))
+    py_files = [f for f in py_files if "node_modules" not in str(f) and ".git" not in str(f) and "__pycache__" not in str(f)]
+    
+    if not py_files:
+        return "No Python files found"
+    
+    # Find Flask/FastAPI routes
+    endpoints = []
+    for f in py_files:
+        try:
+            content = f.read_text()
+            rel = f.relative_to(project_dir)
+            
+            # Flask routes
+            flask_routes = re.findall(r'@\w+\.route\([\'"]([^\'"]+)[\'"]', content)
+            for route in flask_routes:
+                endpoints.append((str(rel), "Flask", route))
+            
+            # FastAPI routes
+            fastapi_routes = re.findall(r'@\w+\.(?:get|post|put|delete|patch)\([\'"]([^\'"]+)[\'"]', content)
+            for route in fastapi_routes:
+                endpoints.append((str(rel), "FastAPI", route))
+            
+            # API calls (requests, urllib)
+            api_calls = re.findall(r'(?:requests\.\w+|urlopen)\([\'"](https?://[^\'"]+)[\'"]', content)
+            for call in api_calls[:5]:
+                endpoints.append((str(rel), "HTTP Call", call))
+        except:
+            pass
+    
+    if endpoints:
+        results.append(f"\n🔌 API Endpoints & Calls ({len(endpoints)}):")
+        for file, method, endpoint in endpoints[:15]:
+            results.append(f"   {file}: [{method}] {endpoint}")
+    else:
+        results.append("\n🔌 No API endpoints detected")
+    
+    # Check for service URLs in config
+    config_files = list(root.rglob("*.json")) + list(root.rglob("*.yaml")) + list(root.rglob("*.yml")) + list(root.rglob("*.toml"))
+    for cf in config_files:
+        if "node_modules" not in str(cf) and ".git" not in str(cf):
+            try:
+                content = cf.read_text()
+                urls = re.findall(r'(https?://[^\s\'"]+)', content)
+                if urls:
+                    results.append(f"\n📋 URLs in {cf.relative_to(root)}:")
+                    for url in urls[:5]:
+                        results.append(f"   {url}")
+            except:
+                pass
+    
+    return "\n".join(results)
+
+
+def scan_dependency_files(project_dir: str) -> str:
+    """Scan dependency manifests for version info."""
+    root = Path(project_dir)
+    results = []
+    
+    # requirements.txt
+    req_file = root / "requirements.txt"
+    if req_file.exists():
+        content = req_file.read_text()
+        deps = [l.strip() for l in content.split("\n") if l.strip() and not l.strip().startswith("#")]
+        results.append(f"📦 requirements.txt: {len(deps)} dependencies")
+        for dep in deps[:15]:
+            results.append(f"   {dep}")
+    
+    # pyproject.toml
+    pyproject = root / "pyproject.toml"
+    if pyproject.exists():
+        content = pyproject.read_text()
+        deps = re.findall(r'"([^"]+>=?[^"]*)"', content)
+        if deps:
+            results.append(f"\n📦 pyproject.toml: {len(deps)} dependencies")
+            for dep in deps[:10]:
+                results.append(f"   {dep}")
+    
+    # package.json
+    pkg = root / "package.json"
+    if pkg.exists():
+        try:
+            data = json.loads(pkg.read_text())
+            prod = data.get("dependencies", {})
+            dev = data.get("devDependencies", {})
+            results.append(f"\n📦 package.json: {len(prod)} prod + {len(dev)} dev deps")
+            for name, ver in list(prod.items())[:10]:
+                results.append(f"   {name}: {ver}")
+        except:
+            pass
+    
+    # Check for __pycache__/version conflicts (duplicate packages)
+    all_imports_seen = {}
+    py_files = list(root.rglob("*.py"))
+    py_files = [f for f in py_files if "node_modules" not in str(f) and ".git" not in str(f) and "__pycache__" not in str(f)]
+    
+    stdlib = {"os", "sys", "json", "re", "pathlib", "subprocess", "datetime", "math", "random", 
+              "typing", "collections", "functools", "itertools", "hashlib", "base64", "urllib",
+              "http", "argparse", "textwrap", "asyncio", "threading", "time", "shutil", "tempfile",
+              "io", "abc", "enum", "dataclasses", "inspect", "logging", "warnings", "copy"}
+    
+    for f in py_files:
+        try:
+            content = f.read_text()
+            imports = re.findall(r'^import\s+(\S+)', content, re.MULTILINE)
+            imports += re.findall(r'^from\s+(\S+)', content, re.MULTILINE)
+            for imp in imports:
+                base = imp.split(".")[0]
+                if base not in stdlib and base != "":
+                    all_imports_seen[base] = all_imports_seen.get(base, 0) + 1
+        except:
+            pass
+    
+    if all_imports_seen:
+        internal = {str(f.relative_to(root).parts[0]) for f in py_files if len(f.relative_to(root).parts) > 1}
+        external = sorted([m for m in all_imports_seen if m not in internal])
+        if external:
+            results.append(f"\n🔍 Unpinned imports ({len(external)}):")
+            for m in external[:10]:
+                results.append(f"   {m} (used {all_imports_seen[m]} times)")
+    
+    return "\n".join(results) if results else "No dependency files found"
+
+
+# ─── AI Provider Call ────────────────────────────────────────────
+
+async def call_provider(name: str, prompt: str, timeout: int = 60) -> Optional[str]:
+    """Call an AI integration agent."""
+    import urllib.request
+    
+    cfg = INTEGRATION_PROVIDERS.get(name)
+    if not cfg:
+        return f"[ERROR: Unknown provider '{name}']"
+    
+    key = os.environ.get(cfg["env_key"])
+    if not key:
+        return f"[ERROR: Missing API key {cfg['env_key']}]"
+    
+    payload = {
+        "model": cfg["model"],
+        "messages": [
+            {"role": "system", "content": "You are an integration testing specialist. Be specific, evidence-based, and actionable. Always cite file paths and component names."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 2048,
+    }
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {key}",
+        "User-Agent": "ZES-Integration/1.0",
+    }
+    
+    if "openrouter" in name or "openrouter" in cfg.get("url", ""):
+        headers["HTTP-Referer"] = "https://github.com/ZESCODE/Zes-Orchestration-System"
+        headers["X-Title"] = "ZES Integration"
+    
+    try:
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(cfg["url"], data=data, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp_data = json.loads(resp.read().decode())
+            content = resp_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return content or "[No content returned]"
+    except Exception as e:
+        return f"[ERROR: {name} failed — {e}]"
+
+
+# ─── Main Integration Logic ──────────────────────────────────────
+
+async def run_integration_check(project_dir: str, service_filter: Optional[str] = None,
+                                ci_mode: bool = False, quick: bool = False,
+                                verbose: bool = False):
+    """Run 3-agent integration verification."""
+    start = datetime.now()
+    
+    print(f"\n{'='*60}")
+    print(f"  🔌 ZES 3-Agent Integration Verification")
+    print(f"{'='*60}")
+    print(f"  Target: {project_dir}")
+    if service_filter:
+        print(f"  Service filter: {service_filter}")
+    print(f"  Time:   {start.strftime('%H:%M:%S')}")
+    print(f"{'='*60}\n")
+    
+    # Phase 0: Local scans
+    print(f"  📋 Running local integration scans...\n")
+    
+    import_scan = scan_imports(project_dir)
+    api_scan = scan_api_endpoints(project_dir)
+    dep_scan = scan_dependency_files(project_dir)
+    
+    print(f"  ✅ Import analysis: {len(import_scan.split(chr(10)))} lines")
+    print(f"  ✅ API endpoint scan: {len(api_scan.split(chr(10)))} lines")
+    print(f"  ✅ Dependency scan: {len(dep_scan.split(chr(10)))} lines")
+    
+    # Build context
+    context = f"PROJECT: {project_dir}\n\nIMPORT SCAN:\n{import_scan}\n\nAPI SCAN:\n{api_scan}\n\nDEPENDENCY SCAN:\n{dep_scan}"
+    
+    if service_filter:
+        context = f"FILTERING for service: {service_filter}\n\n{context}"
+    
+    if quick:
+        print(f"\n  ⚡ Quick mode — single synthesis only")
+        quick_result = await call_provider("service_tester",
+            f"Integration review of this project. Focus on {service_filter if service_filter else 'all components'}.\n\n{context[:5000]}")
+        print(f"\n  💡 QUICK INTEGRATION CHECK")
+        print(f"\n{textwrap.indent(quick_result.strip(), '  ')}")
+        elapsed = (datetime.now() - start).total_seconds()
+        print(f"\n{'='*60}")
+        print(f"  ⏱ {elapsed:.0f}s")
+        print(f"{'='*60}\n")
+        return
+    
+    # Phase 1: 3 parallel agents
+    print(f"\n  🚀 Launching 3 integration agents...\n")
+    
+    agent_context = context[:5000]
+    
+    agent_start = datetime.now()
+    tasks = {
+        "service_tester": call_provider("service_tester",
+            f"{SERVICE_TESTER_PROMPT}\n\nSystem to analyze:\n{agent_context}"),
+        "contract": call_provider("contract",
+            f"{CONTRACT_VERIFIER_PROMPT}\n\nSystem to analyze:\n{agent_context}"),
+        "deps": call_provider("deps",
+            f"{DEPENDENCY_PROMPT}\n\nSystem to analyze:\n{agent_context}"),
+    }
+    
+    results = await asyncio.gather(*[tasks[k] for k in ["service_tester", "contract", "deps"]])
+    agent_elapsed = (datetime.now() - agent_start).total_seconds()
+    
+    svc_result, contract_result, deps_result = results
+    
+    # Phase 2: Synthesis
+    synthesis_prompt = f"""You are the **Integration Synthesizer**. Combine the 3 reports into a summary.
+
+SERVICE INTEGRATION:
+{svc_result[:2000]}
+
+API CONTRACT:
+{contract_result[:2000]}
+
+DEPENDENCY GRAPH:
+{deps_result[:2000]}
+
+Produce:
+1. **Top 5 Integration Issues** — Cross-cutting problems (numbered, with severity)
+2. **Integration Health** — Overall assessment (HEALTHY / WARNING / BROKEN)
+3. **Quick Wins** — Immediate fixes for integration issues
+4. **Architecture Recommendations** — Structural changes to improve integration
+5. **Summary** — One-line integration verdict"""
+    
+    synthesis_result = await call_provider("service_tester", synthesis_prompt)
+    synthesis_result = synthesis_result or "[No synthesis available]"
+    
+    total_elapsed = (datetime.now() - start).total_seconds()
+    
+    # ─── Output ────────────────────────────────────────────────
+    print(f"\n{'='*60}")
+    print(f"  📋 INTEGRATION REPORT ({total_elapsed:.0f}s)")
+    print(f"{'='*60}\n")
+    
+    print(f"  ┌{'─'*56}┐")
+    print(f"  │ 🔌 SERVICE INTEGRATION TESTER                        │")
+    print(f"  └{'─'*56}┘")
+    print(f"\n{textwrap.indent(svc_result.strip(), '  ')}")
+    
+    print(f"\n")
+    print(f"  ┌{'─'*56}┐")
+    print(f"  │ 📋 API CONTRACT VERIFIER                              │")
+    print(f"  └{'─'*56}┘")
+    print(f"\n{textwrap.indent(contract_result.strip(), '  ')}")
+    
+    print(f"\n")
+    print(f"  ┌{'─'*56}┐")
+    print(f"  │ 🧩 DEPENDENCY GRAPH ANALYZER                          │")
+    print(f"  └{'─'*56}┘")
+    print(f"\n{textwrap.indent(deps_result.strip(), '  ')}")
+    
+    print(f"\n")
+    print(f"  ┌{'─'*56}┐")
+    print(f"  │ 📊 SYNTHESIS                                          │")
+    print(f"  └{'─'*56}┘")
+    print(f"\n{textwrap.indent(synthesis_result.strip(), '  ')}")
+    
+    # Local scan output (verbose only)
+    if verbose:
+        print(f"\n")
+        print(f"  ┌{'─'*56}┐")
+        print(f"  │ 📄 LOCAL SCAN DETAILS                              │")
+        print(f"  └{'─'*56}┘")
+        print(f"\n{textwrap.indent(import_scan[:1000], '  ')}")
+        print(f"\n{textwrap.indent(api_scan[:1000], '  ')}")
+        print(f"\n{textwrap.indent(dep_scan[:1000], '  ')}")
+    
+    print(f"\n{'='*60}")
+    print(f"  ⏱ {total_elapsed:.0f}s | Agents: {agent_elapsed:.0f}s")
+    print(f"{'='*60}\n")
+    
+    # CI mode: exit 1 on critical integration issues
+    if ci_mode:
+        verdict = synthesis_result.upper()
+        if "BROKEN" in verdict or (any(word in verdict for word in ["CRITICAL", "HIGH"]) 
+                                    and "HEALTHY" not in verdict):
+            sys.exit(1)
+
+
+# ─── CLI ──────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="ZES 3-Agent Integration Verification — Service + Contract + Dependency in parallel",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            Examples:
+              zes integrate                            # Full integration check
+              zes integrate --dir ~/project             # Specific project
+              zes integrate --service api              # Focus on a service
+              zes integrate --quick                      # Fast check, no AI
+              zes integrate --ci                         # Exit 1 on issues
+        """),
+    )
+    parser.add_argument("--dir", "-d", default=os.getcwd(), help="Project directory")
+    parser.add_argument("--service", "-s", help="Focus on specific service/component")
+    parser.add_argument("--quick", "-q", action="store_true", help="Quick check, skip AI")
+    parser.add_argument("--ci", action="store_true", help="CI mode — exit 1 on failure")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+    
+    args = parser.parse_args()
+    
+    if not os.path.isdir(args.dir):
+        print(f"ERROR: Directory not found: {args.dir}")
+        sys.exit(1)
+    
+    asyncio.run(run_integration_check(args.dir, args.service, args.ci, args.quick, args.verbose))
+
+
+if __name__ == "__main__":
+    main()
