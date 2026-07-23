@@ -1,0 +1,389 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""
+ZES Systematic Debugging — 3-Agent Multi-Provider Debug Engine.
+
+Spawns 3 parallel AI agents to debug any issue:
+  Explorer  → codebase scan, log analysis, CDP diagnostics, evidence
+  Analyzer  → root cause analysis, pattern matching, hypothesis
+  Fixer     → implementation, tests, verification
+
+Usage:
+  zes debug "description of the bug"
+  zes debug "error message" --dir ~/project
+  zes debug --cdp     # Browser debugging with Chrome DevTools
+
+Requires: aiohttp (pip install aiohttp)
+"""
+
+import asyncio, json, os, sys, argparse, textwrap, subprocess
+from datetime import datetime
+from typing import Optional
+
+# ─── Providers ────────────────────────────────────────────────────
+# Uses same DIRECT_PROVIDERS pattern as zes-research
+DEBUG_PROVIDERS = {
+    "explorer": {
+        "url": os.environ.get("EXPLORER_URL", "https://api.groq.com/openai/v1/chat/completions"),
+        "model": os.environ.get("EXPLORER_MODEL", "llama-3.3-70b-versatile"),
+        "env_key": "GROQ_API_KEY",
+        "name": "Explorer (Groq Llama 3.3)",
+    },
+    "analyzer": {
+        "url": os.environ.get("ANALYZER_URL", "https://openrouter.ai/api/v1/chat/completions"),
+        "model": os.environ.get("ANALYZER_MODEL", "deepseek/deepseek-v4-flash"),
+        "env_key": "OPENROUTER_API_KEY",
+        "name": "Analyzer (OpenRouter DeepSeek V4)",
+    },
+    "fixer": {
+        "url": os.environ.get("FIXER_URL", "https://api.llm7.io/v1/chat/completions"),
+        "model": os.environ.get("FIXER_MODEL", "codestral-latest"),
+        "env_key": "LLM7_API_KEY",
+        "name": "Fixer (LLM7 Codestral)",
+    },
+}
+
+# ─── Agent Prompts ────────────────────────────────────────────────
+
+EXPLORER_PROMPT = """You are the **Explorer** agent in a 3-agent debugging team.
+
+Your job: Investigate the bug environment and gather ALL relevant evidence.
+
+Instructions:
+1. Read the error message carefully — extract file paths, line numbers, error codes
+2. If given a project directory (`--dir`), list relevant files, check recent git changes
+3. Look for common patterns: import errors, type mismatches, missing dependencies, config issues
+4. Suggest specific files and line ranges to investigate
+5. If CDP diagnostics were requested, include console error analysis
+
+Output a structured evidence report with:
+- ERROR_SIGNATURE: Exact error message and stack trace
+- ENVIRONMENT: OS, runtime versions, dependency versions
+- RECENT_CHANGES: What changed recently (if git info available)
+- SUSPECT_FILES: Files most likely containing the root cause
+- KEY_CLUES: Specific observations about the failure pattern
+- SUGGESTED_CHECKS: What to investigate next
+
+Be THOROUGH. Your analysis feeds directly into the Analyzer agent."""
+
+ANALYZER_PROMPT = """You are the **Analyzer** agent in a 3-agent debugging team.
+
+Your job: Given the Explorer's evidence, perform root cause analysis.
+
+Instructions:
+1. Read the explorer's evidence report carefully
+2. Apply systematic debugging methodology:
+   a. Form a single hypothesis: "I think X is the root cause because Y"
+   b. Consider: is this an environmental issue, a code bug, a logic error, or a design flaw?
+   c. Check for: off-by-one, null/undefined, race conditions, type confusion, missing error handling
+3. Propose the SMALLEST possible fix to test your hypothesis
+4. Include verification steps to confirm the fix works
+5. If you cannot determine root cause, list what additional evidence is needed
+
+Output:
+- HYPOTHESIS: Single clear hypothesis with reasoning
+- ROOT_CAUSE: The likely root cause
+- PROPOSED_FIX: Minimal change to test hypothesis (specific code change if possible)
+- VERIFICATION: How to confirm the fix resolved the issue
+- FALLBACK: If hypothesis is wrong, what to try next""",
+
+FIXER_PROMPT = """You are the **Fixer** agent in a 3-agent debugging team.
+
+Your job: Implement the fix proposed by the Analyzer, then verify it works.
+
+Instructions:
+1. Read the Analyzer's hypothesis and proposed fix
+2. If the fix involves code changes, write the EXACT code needed
+3. If the fix involves configuration changes, write the exact config
+4. Include commands to:
+   a. Apply the fix
+   b. Test the fix (run the failing command again)
+   c. Verify no regressions
+5. If the fix is complex, break it into steps
+
+Output:
+- FIX_SUMMARY: What was changed and why
+- IMPLEMENTATION: Exact commands or code to apply
+- TEST_COMMANDS: How to verify the fix
+- ROLLBACK: How to undo if the fix doesn't work
+- STATUS: ✅ Ready to apply or ⚠️ Needs more information"""
+
+
+# ─── HTTP Client ──────────────────────────────────────────────────
+
+async def call_provider(name: str, prompt: str, timeout: int = 60) -> Optional[str]:
+    """Call an AI provider with the given system prompt."""
+    import urllib.request
+    
+    cfg = DEBUG_PROVIDERS.get(name)
+    if not cfg:
+        return f"[ERROR: Unknown provider '{name}']"
+    
+    key = os.environ.get(cfg["env_key"])
+    if not key:
+        return f"[ERROR: Missing API key {cfg['env_key']}]"
+    
+    payload = {
+        "model": cfg["model"],
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": f"Bug to debug:\n{prompt}"},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 2048,
+    }
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {key}",
+        "User-Agent": "ZES-Debug-Engine/1.0",
+    }
+    
+    # OpenRouter needs extra headers
+    if "openrouter" in name or "openrouter" in cfg.get("url", ""):
+        headers["HTTP-Referer"] = "https://github.com/ZESCODE/Zes-Orchestration-System"
+        headers["X-Title"] = "ZES Debug Engine"
+    
+    try:
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(cfg["url"], data=data, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp_data = json.loads(resp.read().decode())
+            content = resp_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return content or "[No content returned by provider]"
+    except Exception as e:
+        return f"[ERROR: {name} failed — {e}]"
+
+
+# ─── CDP Diagnostics ──────────────────────────────────────────────
+
+async def capture_cdp_evidence(bug_description: str) -> str:
+    """Capture browser console errors via CDP if Chromium is running."""
+    result = []
+    try:
+        # Check if CDP is available
+        proc = await asyncio.create_subprocess_exec(
+            "curl", "-s", "--max-time", "3", "http://127.0.0.1:9222/json/version",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        cdp_info = json.loads(stdout) if stdout else {}
+        if cdp_info.get("webSocketDebuggerUrl"):
+            result.append(f"✅ CDP available at ws://127.0.0.1:9222")
+            result.append(f"   Browser: {cdp_info.get('Browser', 'unknown')}")
+            
+            # Get list of tabs
+            proc2 = await asyncio.create_subprocess_exec(
+                "curl", "-s", "--max-time", "3", "http://127.0.0.1:9222/json",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            stdout2, _ = await asyncio.wait_for(proc2.communicate(), timeout=5)
+            tabs = json.loads(stdout2) if stdout2 else []
+            if tabs:
+                result.append(f"   Open tabs: {len(tabs)}")
+                for t in tabs[:3]:
+                    result.append(f"     - {t.get('title','?')} ({t.get('url','?')})")
+            else:
+                result.append(f"   No open tabs found")
+        else:
+            result.append(f"❌ CDP not available at ws://127.0.0.1:9222")
+            result.append(f"   (Chromium headless may not be running)")
+    except Exception as e:
+        result.append(f"⚠️ CDP check failed: {e}")
+    
+    return "\n".join(result)
+
+
+# ─── Codebase Scan ────────────────────────────────────────────────
+
+def scan_codebase(project_dir: str, error_keywords: list = None) -> str:
+    """Quick scan of project directory for relevant files."""
+    result = []
+    result.append(f"📁 Scanning: {project_dir}")
+    
+    # Check if it's a git repo
+    try:
+        proc = subprocess.run(
+            ["git", "log", "--oneline", "-10"],
+            capture_output=True, text=True, timeout=5, cwd=project_dir
+        )
+        if proc.returncode == 0:
+            result.append(f"\n📝 Recent commits:")
+            for line in proc.stdout.strip().split("\n")[:5]:
+                result.append(f"   {line}")
+        
+        # Check diff
+        proc2 = subprocess.run(
+            ["git", "diff", "--stat"],
+            capture_output=True, text=True, timeout=5, cwd=project_dir
+        )
+        if proc2.stdout.strip():
+            result.append(f"\n📝 Uncommitted changes:")
+            for line in proc2.stdout.strip().split("\n")[:5]:
+                result.append(f"   {line}")
+    except:
+        pass
+    
+    # Search for error files
+    if error_keywords:
+        result.append(f"\n🔍 Searching for error-related files:")
+        for kw in error_keywords[:3]:
+            try:
+                proc = subprocess.run(
+                    ["grep", "-r", "-l", kw, project_dir, "--include=*.py", "--include=*.js", "--include=*.ts", "--include=*.tsx", "--include=*.jsx"],
+                    capture_output=True, text=True, timeout=5
+                )
+                files = [f for f in proc.stdout.strip().split("\n") if f][:5]
+                if files:
+                    result.append(f"   '{kw}' found in: {', '.join(files)}")
+            except:
+                pass
+    
+    return "\n".join(result)
+
+
+# ─── Main Debug Logic ─────────────────────────────────────────────
+
+async def run_debug(bug_description: str, project_dir: Optional[str] = None,
+                    use_cdp: bool = False, verbose: bool = False):
+    """Run 3-agent debugging pipeline."""
+    print(f"\n{'='*60}")
+    print(f"  🔍 ZES 3-Agent Debug Engine")
+    print(f"{'='*60}")
+    print(f"  Bug: {bug_description[:80]}{'...' if len(bug_description) > 80 else ''}")
+    print(f"  Time: {datetime.now().strftime('%H:%M:%S')}")
+    print(f"{'='*60}\n")
+    
+    # Phase 0: Gather evidence
+    evidence_parts = [f"BUG_DESCRIPTION: {bug_description}"]
+    
+    if project_dir:
+        keywords = [w for w in bug_description.split() if len(w) > 3][:5]
+        scan = scan_codebase(project_dir, keywords)
+        evidence_parts.append(scan)
+        print(f"  📁 Project scan: {project_dir}")
+    
+    if use_cdp:
+        cdp = await capture_cdp_evidence(bug_description)
+        evidence_parts.append(cdp)
+        print(f"  🌐 CDP diagnostics requested")
+    
+    full_evidence = "\n\n".join(evidence_parts)
+    
+    # Phase 1: 3 parallel agents
+    print(f"\n  🚀 Launching 3 agents in parallel...\n")
+    
+    start = datetime.now()
+    tasks = {
+        "explorer": call_provider("explorer", 
+            f"{EXPLORER_PROMPT}\n\nEvidence:\n{full_evidence}"),
+        "analyzer": call_provider("analyzer",
+            f"{ANALYZER_PROMPT}\n\nBug:\n{bug_description}"),
+        "fixer": call_provider("fixer",
+            f"{FIXER_PROMPT}\n\nBug:\n{bug_description}"),
+    }
+    
+    # Run all 3 in parallel
+    results = await asyncio.gather(*[tasks[k] for k in ["explorer", "analyzer", "fixer"]])
+    elapsed = (datetime.now() - start).total_seconds()
+    
+    explorer_result, analyzer_result, fixer_result = results
+    
+    # Phase 2: Synthesize (run analyzer with explorer's output if explorer succeeded)
+    if not analyzer_result.startswith("[ERROR"):
+        # Use explorer output as input for analyzer
+        revised_analyzer_task = call_provider("analyzer",
+            f"{ANALYZER_PROMPT}\n\nEvidence from Explorer:\n{explorer_result[:3000]}\n\nOriginal bug:\n{bug_description}")
+        revised_analyzer_result = await revised_analyzer_task
+        if not revised_analyzer_result.startswith("[ERROR"):
+            analyzer_result = revised_analyzer_result
+    
+    # Phase 3: Fixer with final analysis
+    if not fixer_result.startswith("[ERROR") and not analyzer_result.startswith("[ERROR"):
+        revised_fixer_task = call_provider("fixer",
+            f"{FIXER_PROMPT}\n\nAnalysis from Analyzer:\n{analyzer_result[:3000]}\n\nOriginal bug:\n{bug_description}")
+        revised_fixer_result = await revised_fixer_task
+        if not revised_fixer_result.startswith("[ERROR"):
+            fixer_result = revised_fixer_result
+    
+    # ─── Output ────────────────────────────────────────────────
+    print(f"\n{'='*60}")
+    print(f"  📋 DEBUG REPORT ({elapsed:.0f}s)")
+    print(f"{'='*60}\n")
+    
+    print(f"  ┌{'─'*56}┐")
+    print(f"  │ 🔎 EXPLORER AGENT                                      │")
+    print(f"  └{'─'*56}┘")
+    print(f"\n{textwrap.indent(explorer_result.strip(), '  ')}")
+    
+    print(f"\n")
+    print(f"  ┌{'─'*56}┐")
+    print(f"  │ 🧠 ANALYZER AGENT                                      │")
+    print(f"  └{'─'*56}┘")
+    print(f"\n{textwrap.indent(analyzer_result.strip(), '  ')}")
+    
+    print(f"\n")
+    print(f"  ┌{'─'*56}┐")
+    print(f"  │ 🔧 FIXER AGENT                                         │")
+    print(f"  └{'─'*56}┘")
+    print(f"\n{textwrap.indent(fixer_result.strip(), '  ')}")
+    
+    print(f"\n{'='*60}")
+    print(f"  ⏱ Total: {elapsed:.0f}s | Agents: Explorer+Analyzer+Fixer")
+    print(f"{'='*60}\n")
+    
+    return {
+        "explorer": explorer_result,
+        "analyzer": analyzer_result,
+        "fixer": fixer_result,
+    }
+
+
+# ─── CLI ──────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="ZES 3-Agent Debug Engine — Explorer + Analyzer + Fixer in parallel",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            Examples:
+              zes debug "ModuleNotFoundError: No module named 'aiohttp'"
+              zes debug "TypeError: Cannot read properties of undefined" --dir ~/project
+              zes debug "White screen on dashboard" --cdp
+              zes debug --cdp "Runtime SyntaxError in browser"
+        """),
+    )
+    parser.add_argument("bug", nargs="*", help="Bug description or error message")
+    parser.add_argument("--dir", "-d", help="Project directory to scan")
+    parser.add_argument("--cdp", action="store_true", help="Capture CDP browser diagnostics")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show provider details")
+    parser.add_argument("--providers", help="Custom provider config JSON file")
+    
+    args = parser.parse_args()
+    
+    if not args.bug and not args.cdp:
+        parser.print_help()
+        sys.exit(1)
+    
+    bug_description = " ".join(args.bug) if args.bug else ""
+    if not bug_description and args.cdp:
+        bug_description = "Browser debugging requested (CDP diagnostics)"
+    
+    # Load custom providers if specified
+    if args.providers:
+        with open(args.providers) as f:
+            custom = json.load(f)
+            for key in ["explorer", "analyzer", "fixer"]:
+                if key in custom:
+                    DEBUG_PROVIDERS[key].update(custom[key])
+    
+    if args.verbose:
+        print("Provider config:")
+        for name, cfg in DEBUG_PROVIDERS.items():
+            print(f"  {name}: {cfg['name']} ({cfg['model']})")
+        print()
+    
+    asyncio.run(run_debug(bug_description, args.dir, args.cdp, args.verbose))
+
+
+if __name__ == "__main__":
+    main()
