@@ -1,0 +1,628 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""ZES Memory Consolidator — Scans Holographic Memory Hub, spawns parallel
+analysis agents to find duplicates, contradictions, and quality issues,
+then consolidates. Keeps memory lean without manual cleanup.
+
+Usage:
+  zes consolidate              # Full scan + consolidate
+  zes consolidate --report     # Just report, no changes
+  zes consolidate --force      # Auto-consolidate without confirmation
+"""
+
+import asyncio, aiohttp, json, sys, os, argparse, sqlite3, re, time
+from datetime import datetime
+from pathlib import Path
+
+# ─── Memory Hub DB ────────────────────────────────────────────────
+MEMORY_DB = os.path.expanduser("~/.zes/memory_hub.sqlite")
+
+# ─── Load API Keys ────────────────────────────────────────────────
+def _load_env():
+    env_file = os.path.expanduser("~/.secure-credentials/master.env")
+    if os.path.exists(env_file):
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("export "):
+                    parts = line[7:].split("=", 1)
+                    if len(parts) == 2:
+                        val = parts[1].strip("\"'")
+                        if val:
+                            os.environ.setdefault(parts[0], val)
+_load_env()
+
+# ─── Provider Config ───────────────────────────────────────────────
+SYNTHESIS_CFG = {
+    "url": "http://127.0.0.1:4356/v1/chat/completions",
+    "model": "openai/gpt-5.4-mini",
+}
+
+ANALYSIS_PROVIDERS = [
+    {
+        "name": "Duplicate Detection",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "model": "llama-3.3-70b-versatile",
+        "env_key": "GROQ_API_KEY",
+        "angle": "duplicates",
+    },
+    {
+        "name": "Contradiction Detection",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "deepseek/deepseek-v4-flash",
+        "env_key": "OPENROUTER_API_KEY",
+        "angle": "contradictions",
+    },
+    {
+        "name": "Quality Assessment",
+        "url": "http://127.0.0.1:4356/v1/chat/completions",
+        "model": "openai/gpt-5.4-mini",
+        "env_key": None,
+        "angle": "quality",
+    },
+]
+
+
+def get_db():
+    """Connect to memory hub DB."""
+    if not os.path.exists(MEMORY_DB):
+        print(f"Error: Memory DB not found at {MEMORY_DB}")
+        sys.exit(1)
+    conn = sqlite3.connect(MEMORY_DB)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def load_all_facts():
+    """Load all facts with entity info."""
+    conn = get_db()
+    facts = conn.execute("""
+        SELECT f.fact_id, f.content, f.category, f.tags, f.trust_score,
+               f.retrieval_count, f.helpful_count, f.created_at, f.updated_at,
+               GROUP_CONCAT(e.name, '||') as entity_names,
+               GROUP_CONCAT(e.entity_id, ',') as entity_ids
+        FROM facts f
+        LEFT JOIN fact_entities fe ON f.fact_id = fe.fact_id
+        LEFT JOIN entities e ON fe.entity_id = e.entity_id
+        GROUP BY f.fact_id
+        ORDER BY f.fact_id
+    """).fetchall()
+    conn.close()
+    return facts
+
+
+def update_fact(fact_id, **kwargs):
+    """Update a fact's fields."""
+    conn = get_db()
+    sets = []
+    vals = []
+    for k, v in kwargs.items():
+        sets.append(f"{k} = ?")
+        vals.append(v)
+    sets.append("updated_at = CURRENT_TIMESTAMP")
+    sql = f"UPDATE facts SET {', '.join(sets)} WHERE fact_id = ?"
+    vals.append(fact_id)
+    conn.execute(sql, vals)
+    conn.commit()
+    conn.close()
+
+
+def delete_fact(fact_id):
+    """Delete a fact and its entity links."""
+    conn = get_db()
+    conn.execute("DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,))
+    conn.execute("DELETE FROM facts WHERE fact_id = ?", (fact_id,))
+    conn.commit()
+    conn.close()
+
+
+def merge_facts(keep_id, remove_id):
+    """Merge two facts — keep one, delete the other. Transfer entity links."""
+    conn = get_db()
+    # Transfer entity links from remove to keep
+    conn.execute("""
+        INSERT OR IGNORE INTO fact_entities (fact_id, entity_id)
+        SELECT ?, entity_id FROM fact_entities WHERE fact_id = ?
+    """, (keep_id, remove_id))
+    # Transfer retrieval/helpful counts
+    conn.execute("""
+        UPDATE facts SET
+            retrieval_count = retrieval_count + (SELECT retrieval_count FROM facts WHERE fact_id = ?),
+            helpful_count = helpful_count + (SELECT helpful_count FROM facts WHERE fact_id = ?),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE fact_id = ?
+    """, (remove_id, remove_id, keep_id))
+    # Delete the old fact
+    conn.execute("DELETE FROM fact_entities WHERE fact_id = ?", (remove_id,))
+    conn.execute("DELETE FROM facts WHERE fact_id = ?", (remove_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_fact_count():
+    """Get current fact count."""
+    conn = get_db()
+    count = conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+    conn.close()
+    return count
+
+
+async def call_provider(session, cfg, prompt, timeout=30):
+    """Call a provider with a prompt and return response."""
+    headers = {"Content-Type": "application/json"}
+    if cfg.get("env_key"):
+        key = os.environ.get(cfg["env_key"])
+        if not key:
+            return f'{{"error":"MISSING_KEY for {cfg.get("name", "?")}"}}'
+        headers["Authorization"] = f"Bearer {key}"
+
+    if "openrouter" in cfg.get("url", ""):
+        headers["HTTP-Referer"] = "https://github.com/ZESCODE/Zes-Orchestration-System"
+        headers["X-Title"] = "ZES Memory Consolidator"
+    
+    # Use explicit user-agent
+    headers["User-Agent"] = "ZES-Memory-Consolidator/1.0"
+
+    payload = {
+        "model": cfg["model"],
+        "messages": [
+            {"role": "system", "content": "You are a ZES memory analyst. Analyze the facts and return structured JSON only. No markdown, no explanation."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 4096,
+    }
+
+    try:
+        async with session.post(
+            cfg["url"], json=payload, headers=headers,
+            timeout=aiohttp.ClientTimeout(total=timeout),
+        ) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                return f'{{"error":"HTTP {resp.status}: {text[:200]}"}}'
+            data = await resp.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if not content:
+                return f'{{"error":"EMPTY_RESPONSE"}}'
+            return content
+    except asyncio.TimeoutError:
+        return '{"error":"TIMEOUT"}'
+    except Exception as e:
+        return f'{{"error":"{str(e)[:100]}"}}'
+def build_fact_report(facts):
+    """Build a comprehensive fact report for the analysis prompts."""
+    lines = []
+    for f in facts:
+        entities = (f["entity_names"] or "none").replace("||", ", ")
+        lines.append(
+            f"ID:{f['fact_id']} | "
+            f"Content: {f['content'][:150]} | "
+            f"Category: {f['category']} | "
+            f"Trust: {f['trust_score']:.2f} | "
+            f"Retrieved: {f['retrieval_count']} | "
+            f"Helpful: {f['helpful_count']} | "
+            f"Tags: {f['tags']} | "
+            f"Entities: {entities}"
+        )
+    report = "\n".join(lines)
+    
+    # Truncate if too long (Groq has 32K context limit)
+    if len(report) > 15000:
+        report = report[:15000] + "\n... [TRUNCATED]"
+    return report
+
+
+# ─── Analysis Prompts ──────────────────────────────────────────────
+
+DUPLICATE_PROMPT = """You are analyzing a memory knowledge base. Find SIMILAR or DUPLICATE facts.
+
+Return a JSON array of duplicate groups:
+[
+  {{
+    "fact_ids": [1, 2, 3],
+    "keep_id": 1,
+    "reason": "Both describe the same agent configuration",
+    "confidence": "high" | "medium" | "low"
+  }}
+]
+
+Rules:
+- Only flag facts that are TRULY duplicates or near-duplicates (>80% semantic overlap)
+- Prefer keeping the fact that is more recent or has higher trust_score
+- Set confidence "high" if facts are nearly identical, "medium" if similar but not identical
+
+FACTS TO ANALYZE:
+{facts}"""
+
+CONTRADICTION_PROMPT = """You are analyzing a memory knowledge base. Find CONTRADICTORY or CONFLICTING facts.
+
+Return a JSON array of contradiction groups:
+[
+  {{
+    "fact_ids": [1, 2],
+    "conflict_type": "direct" | "partial" | "outdated",
+    "resolution": "Fact 1 is correct because ...",
+    "confidence": "high" | "medium" | "low"
+  }}
+]
+
+Rules:
+- Direct contradiction: same topic, opposite claims
+- Partial: disagree on specifics
+- Outdated: one fact supersedes another
+- For resolution, mark which fact(s) to keep and which to update or delete
+
+FACTS TO ANALYZE:
+{facts}"""
+
+QUALITY_PROMPT = """You are analyzing a memory knowledge base. Assess QUALITY of each fact.
+
+Return a JSON object:
+{{
+  "low_quality_ids": [1, 2, 3],
+  "high_value_ids": [4, 5, 6],
+  "recommendations": [
+    {{
+      "fact_id": 1,
+      "action": "delete" | "boost" | "update" | "keep",
+      "reason": "...",
+      "suggested_trust_score": 0.0,
+      "suggested_category": "...",
+      "suggested_tags": "..."
+    }}
+  ],
+  "summary": {{
+    "total_facts": 112,
+    "low_quality": 5,
+    "high_value": 15,
+    "actionable": 10
+  }}
+}}
+
+Criteria for LOW quality:
+- Vague or unactionable content
+- Opinion stated as fact
+- Low retrieval_count (< 2) AND low helpful_count (< 1) AND old (> 30 days)
+- Redundant with other facts
+
+Criteria for HIGH value:
+- High retrieval_count OR helpful_count
+- Actionable, specific information
+- Core architectural or config knowledge
+
+FACTS TO ANALYZE:
+{facts}"""
+
+
+async def run_consolidation(conn, args):
+    """Main consolidation logic."""
+    facts = load_all_facts()
+    total = len(facts)
+
+    print(f"{'═'*60}")
+    print(f"  ZES Memory Consolidator")
+    print(f"{'═'*60}")
+    print(f"  Memory DB: {MEMORY_DB}")
+    print(f"  Facts:     {total}")
+    print(f"  Mode:      {'Report only' if args.report else 'Full consolidation'}")
+    print(f"{'═'*60}\n")
+
+    # Step 1: Local analysis (fast — no API calls)
+    print("  🔍 Step 1: Local analysis...")
+    local_duplicates = find_local_duplicates(facts)
+    if local_duplicates:
+        print(f"     Found {len(local_duplicates)} local duplicate groups")
+    else:
+        print("     No local duplicates found")
+
+    # Step 2: Parallel AI analysis (3 agents)
+    print("  🤖 Step 2: Spawning 3 parallel analysis agents...")
+
+    report = build_fact_report(facts)
+
+    prompts = {
+        "Duplicate Detection": DUPLICATE_PROMPT.format(facts=report),
+        "Contradiction Detection": CONTRADICTION_PROMPT.format(facts=report),
+        "Quality Assessment": QUALITY_PROMPT.format(facts=report),
+    }
+
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for prov in ANALYSIS_PROVIDERS:
+            prompt = prompts.get(prov["name"])
+            if prompt:
+                tasks.append(call_provider(session, prov, prompt, 45))
+
+        results = await asyncio.gather(*tasks)
+
+    parsed_results = {}
+    for i, prov in enumerate(ANALYSIS_PROVIDERS):
+        name = prov["name"]
+        raw = results[i] if i < len(results) and results[i] is not None else "[NO RESULT]"
+        char_count = len(raw) if raw and raw != "[NO RESULT]" else 0
+        print(f"    ✅ {name}: {char_count} chars")
+
+        # Try to extract JSON from the response
+        json_data = try_extract_json(raw) if raw and raw != "[NO RESULT]" else None
+        if json_data:
+            parsed_results[name] = json_data
+        else:
+            print(f"      ⚠ Could not parse JSON from {name} (raw preview: {str(raw)[:80]})")
+            parsed_results[name] = None
+
+    # Step 3: Synthesize findings
+    print("  🔄 Step 3: Generating consolidation report...")
+
+    duplicates = parsed_results.get("Duplicate Detection", [])
+    contradictions = parsed_results.get("Contradiction Detection", [])
+    quality = parsed_results.get("Quality Assessment", {})
+
+    print(f"\n{'═'*60}")
+    print(f"  CONSOLIDATION REPORT")
+    print(f"{'═'*60}")
+
+    # Print duplicates
+    dups = []
+    if isinstance(duplicates, list):
+        dups = duplicates
+    elif isinstance(duplicates, dict):
+        dups = duplicates.get("duplicates", duplicates.get("groups", []))
+
+    print(f"\n  📋 Duplicate Groups: {len(dups)}")
+    for d in dups[:10]:
+        ids = d.get("fact_ids", [])
+        keep = d.get("keep_id", ids[0] if ids else "?")
+        reason = d.get("reason", "")[:80]
+        conf = d.get("confidence", "?")
+        print(f"     IDs {ids} → keep {keep} [{conf}] {reason}")
+
+    # Print contradictions
+    contras = []
+    if isinstance(contradictions, list):
+        contras = contradictions
+    elif isinstance(contradictions, dict):
+        contras = contradictions.get("contradictions", contradictions.get("groups", []))
+
+    print(f"\n  ⚡ Contradictions: {len(contras)}")
+    for c in contras[:10]:
+        ids = c.get("fact_ids", [])
+        ctype = c.get("conflict_type", "?")
+        resolution = c.get("resolution", "")[:80]
+        print(f"     IDs {ids} [{ctype}] → {resolution}")
+
+    # Print quality
+    low_ids = []
+    high_ids = []
+    recommendations = []
+    if isinstance(quality, dict):
+        low_ids = quality.get("low_quality_ids", quality.get("low_quality", []))
+        high_ids = quality.get("high_value_ids", quality.get("high_value", []))
+        recommendations = quality.get("recommendations", [])
+        summary = quality.get("summary", {})
+        print(f"\n  📊 Quality Assessment:")
+        print(f"     Low quality: {len(low_ids)}")
+        print(f"     High value:  {len(high_ids)}")
+        print(f"     Actions:     {len(recommendations)}")
+
+    # Step 4: Action
+    if args.report:
+        print(f"\n  ℹ  Report only — no changes made.")
+        print(f"     Run without --report to consolidate.")
+    elif args.force:
+        print(f"\n  🚀 Auto-consolidating (--force)...")
+        await apply_changes(facts, dups, contras, recommendations, low_ids, high_ids)
+    else:
+        print(f"\n  🚀 Ready to consolidate.")
+        print(f"     Run with --force to apply changes.")
+        print(f"     Or review the report and run: zes consolidate --force")
+
+    print(f"{'═'*60}")
+    print(f"  Done.")
+    return 0
+
+
+def try_extract_json(text):
+    """Try to extract JSON from a response (which may have markdown wrapping)."""
+    if not text:
+        return None
+    
+    text = text.strip()
+    
+    # Direct parse attempt
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    
+    # Try to find JSON in markdown code blocks
+    block_match = re.search(r'```(?:json)?\s*\n?(.+?)\n?```', text, re.DOTALL)
+    if block_match:
+        try:
+            return json.loads(block_match.group(1))
+        except json.JSONDecodeError:
+            pass
+    
+    # Try depth-based scanning for JSON array or object
+    for start_char, end_char in [('[', ']'), ('{', '}')]:
+        start = text.find(start_char)
+        if start >= 0:
+            depth = 0
+            for i in range(start, len(text)):
+                if text[i] == start_char:
+                    depth += 1
+                elif text[i] == end_char:
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(text[start:i+1])
+                        except json.JSONDecodeError:
+                            break
+    return None
+
+
+def find_local_duplicates(facts):
+    """Find duplicate facts locally using fast Jaccard similarity."""
+    groups = []
+    checked = set()
+
+    # Pre-compute word sets for all facts
+    fact_sets = {}
+    for f in facts:
+        words = set(re.findall(r'\b\w{4,}\b', f["content"].lower()))
+        fact_sets[f["fact_id"]] = words
+
+    for i, f1 in enumerate(facts):
+        fid1 = f1["fact_id"]
+        if fid1 in checked:
+            continue
+        words1 = fact_sets[fid1]
+        group = [fid1]
+
+        for j, f2 in enumerate(facts):
+            if i >= j:
+                continue
+            fid2 = f2["fact_id"]
+            if fid2 in checked:
+                continue
+            words2 = fact_sets[fid2]
+
+            # Jaccard similarity on word sets (fast)
+            if len(words1) < 3 or len(words2) < 3:
+                continue
+            intersection = len(words1 & words2)
+            union = len(words1 | words2)
+            if union == 0:
+                continue
+            jaccard = intersection / union
+
+            if jaccard > 0.7:
+                group.append(fid2)
+                checked.add(fid2)
+
+        if len(group) > 1:
+            # Keep the one with highest retrieval+helpful
+            keep = max(group, key=lambda fid: next(
+                (f["retrieval_count"] + f["helpful_count"] for f in facts if f["fact_id"] == fid), 0
+            ))
+            groups.append({
+                "fact_ids": group,
+                "keep_id": keep,
+                "reason": f"Jaccard similarity {jaccard:.2f}",
+                "confidence": "high" if len(group) == 2 else "medium",
+            })
+            checked.add(fid1)
+
+    return groups
+
+
+async def apply_changes(facts, duplicates, contradictions, recommendations, low_ids, high_ids):
+    """Apply consolidation changes to the database."""
+    changes = 0
+
+    # 1. Merge duplicates
+    for d in duplicates:
+        ids = d.get("fact_ids", [])
+        keep_id = d.get("keep_id", ids[0] if ids else None)
+        if keep_id and len(ids) > 1:
+            for fid in ids:
+                if fid != keep_id:
+                    try:
+                        merge_facts(keep_id, fid)
+                        changes += 1
+                        print(f"     Merged fact {fid} → {keep_id}")
+                    except Exception as e:
+                        print(f"     Error merging {fid} → {keep_id}: {e}")
+
+    # 2. Apply quality recommendations
+    for rec in recommendations:
+        fid = rec.get("fact_id")
+        action = rec.get("action")
+        if not fid:
+            continue
+
+        try:
+            if action == "delete":
+                delete_fact(fid)
+                changes += 1
+                print(f"     Deleted fact {fid} — {rec.get('reason', '')[:60]}")
+            elif action == "boost":
+                new_trust = rec.get("suggested_trust_score", 0.8)
+                update_fact(fid, trust_score=new_trust)
+                changes += 1
+                print(f"     Boosted fact {fid} trust → {new_trust}")
+            elif action == "update":
+                kwargs = {}
+                if rec.get("suggested_trust_score"):
+                    kwargs["trust_score"] = rec["suggested_trust_score"]
+                if rec.get("suggested_category"):
+                    kwargs["category"] = rec["suggested_category"]
+                if rec.get("suggested_tags"):
+                    kwargs["tags"] = rec["suggested_tags"]
+                if kwargs:
+                    update_fact(fid, **kwargs)
+                    changes += 1
+                    print(f"     Updated fact {fid}: {kwargs}")
+        except Exception as e:
+            print(f"     Error on fact {fid}: {e}")
+
+    # 3. Boost high-value facts
+    hfids = high_ids if isinstance(high_ids, list) else []
+    for fid in hfids[:20]:  # cap at 20
+        try:
+            update_fact(fid, trust_score=min(1.0, 
+                sum(f["trust_score"] for f in facts if f["fact_id"] == fid) + 0.2) if any(f["fact_id"] == fid for f in facts) else 0.8
+            )
+            changes += 1
+        except Exception as e:
+            print(f"     Error boosting {fid}: {e}")
+
+    after_count = get_fact_count()
+    before_count = len(facts)
+
+    print(f"\n  ✅ Consolidation complete!")
+    print(f"     Changes applied: {changes}")
+    print(f"     Facts: {before_count} → {after_count} (removed {before_count - after_count})")
+
+
+async def main():
+    parser = argparse.ArgumentParser(
+        description="ZES Memory Consolidator",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--report", "-r", action="store_true",
+                        help="Report only — no database changes")
+    parser.add_argument("--force", "-f", action="store_true",
+                        help="Auto-consolidate without confirmation")
+    parser.add_argument("--quick", "-q", action="store_true",
+                        help="Quick scan (local analysis only, no AI agents)")
+
+    args = parser.parse_args()
+
+    if not os.path.exists(MEMORY_DB):
+        print(f"Error: Memory DB not found at {MEMORY_DB}")
+        sys.exit(1)
+
+    total = get_fact_count()
+    print(f"Memory Hub: {MEMORY_DB}")
+    print(f"Total facts: {total}")
+
+    if args.quick:
+        # Just local analysis
+        facts = load_all_facts()
+        dups = find_local_duplicates(facts)
+        print(f"\nLocal duplicates found: {len(dups)}")
+        for d in dups:
+            print(f"  IDs {d['fact_ids']} → keep {d['keep_id']} ({d['reason']})")
+        if not args.report and args.force:
+            for d in dups:
+                for fid in d["fact_ids"]:
+                    if fid != d["keep_id"]:
+                        merge_facts(d["keep_id"], fid)
+            print(f"\nConsolidated. New count: {get_fact_count()}")
+        return 0
+
+    return await run_consolidation(None, args)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
