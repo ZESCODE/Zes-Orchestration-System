@@ -1,0 +1,46 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# ZES Deploy Script — Run after push
+# Called by: zes push --deploy
+set -e
+
+echo "  🚀 Deploying ZES updates..."
+cd ~/Zes-Orchestration-System
+
+# 1. Sync binaries to ~/.local/bin/
+echo "  📦 Syncing CLI tools..."
+for f in scripts/zes-* scripts/zes.sh; do
+  target="${f#scripts/}"
+  target="${target%.sh}"
+  if [ -f "$f" ]; then
+    cp "$f" "$HOME/.local/bin/$target"
+    chmod +x "$HOME/.local/bin/$target"
+    echo "     ✅ $target"
+  fi
+done
+
+# 2. Update CLI wrapper
+cp scripts/zes-cli.sh ~/.local/bin/zes
+chmod +x ~/.local/bin/zes
+echo "  ✅ Wrapper updated"
+
+# 3. Sync skill docs
+echo "  📚 Syncing skills..."
+for skill_dir in skills/ZES-*; do
+  if [ -d "$skill_dir" ]; then
+    skill_name=$(basename "$skill_dir")
+    target_dir="$HOME/.codex/skills/$skill_name"
+    mkdir -p "$target_dir"
+    if [ -f "$skill_dir/SKILL.md" ]; then
+      cp "$skill_dir/SKILL.md" "$target_dir/"
+      echo "     ✅ $skill_name"
+    fi
+  fi
+done
+
+# 4. Restart widget service if it exists
+if sv status zes-widget >/dev/null 2>&1; then
+  sv restart zes-widget 2>/dev/null
+  echo "  🔄 Widget service restarted"
+fi
+
+echo "  ✅ Deploy complete"

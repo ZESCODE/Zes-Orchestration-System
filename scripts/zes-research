@@ -252,8 +252,15 @@ Format the final report with:
 
 
 # ─── Health Check ──────────────────────────────────────────────────
+# Reasoning models (e.g. MiMo) need larger max_tokens or alternate test strategy
+REASONING_MODELS = {"mimo-v2.5-free"}
+DEAD_PROVIDERS = {"opencode_key"}  # Genuinely dead (e.g., expired key, shut down)
+
 async def check_providers() -> list[str]:
-    """Check which providers are online with a quick ping."""
+    """Check which providers are online with a quick ping.
+    Uses provider-aware strategies: reasoning models get a larger prompt,
+    dead providers are reported with clear error messages.
+    """
     online = []
     async with aiohttp.ClientSession() as session:
         for name, cfg in ALL_PROVIDERS.items():
@@ -268,19 +275,38 @@ async def check_providers() -> list[str]:
                         headers["Authorization"] = f"Bearer {key}"
                     else:
                         headers[auth_header] = key
-                # Quick ping with minimal tokens
-                payload = {
-                    "model": cfg["model"],
-                    "messages": [{"role": "user", "content": "ping"}],
-                    "max_tokens": 5,
-                }
+                
+                # Provider-aware test strategy
+                model = cfg["model"]
+                if model in REASONING_MODELS or name in DEAD_PROVIDERS:
+                    # Reasoning models need more tokens and a structured prompt
+                    if name in DEAD_PROVIDERS:
+                        # Mark as dead — no point testing
+                        continue
+                    payload = {
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": "You are a helpful assistant."},
+                            {"role": "user", "content": "Reply with exactly: OK"},
+                        ],
+                        "max_tokens": 20,
+                        "temperature": 0,
+                    }
+                else:
+                    # Standard models: minimal ping
+                    payload = {
+                        "model": model,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "max_tokens": 5,
+                    }
+                
                 async with session.post(
                     cfg["url"], json=payload, headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=5),
+                    timeout=aiohttp.ClientTimeout(total=8),
                 ) as resp:
                     if resp.status == 200:
                         online.append(name)
-            except:
+            except Exception as e:
                 pass
     return online
 
@@ -323,10 +349,18 @@ async def main():
         online = await check_providers()
         print(f"\n{'─'*50}")
         for name, cfg in sorted(ALL_PROVIDERS.items()):
-            status = "✅ ONLINE" if name in online else "❌ OFFLINE/MISSING KEY"
+            if name in DEAD_PROVIDERS:
+                status = "💀 DEAD (account issue)"
+            elif name in online:
+                status = "✅ ONLINE"
+            else:
+                status = "❌ OFFLINE (check key/network)"
             key_status = "🔑" if cfg.get("env_key") else "🔓"
             print(f"  {key_status} {name:25s} → {cfg['name']:35s} {status}")
-        print(f"\n{len(online)}/{len(ALL_PROVIDERS)} providers available")
+        
+        dead_count = len([n for n in DEAD_PROVIDERS if n in ALL_PROVIDERS])
+        print(f"\n{len(online)}/{len(ALL_PROVIDERS)} providers available "
+              f"({dead_count} dead, {len(ALL_PROVIDERS) - len(online) - dead_count} offline)")
         return
 
     if not args.topic:

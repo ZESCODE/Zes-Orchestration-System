@@ -1,0 +1,315 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""
+ZES Push — One-command git commit + push + deploy.
+
+Usage:
+  zes push                        # Auto-commit all changes with AI message
+  zes push "fix typo"             # Manual commit message
+  zes push --dry-run              # Show what would be committed
+  zes push --no-push              # Commit but don't push
+  zes push --deploy               # Commit + push + run deploy script
+  zes push --deploy-script ~/deploy.sh  # Custom deploy script
+"""
+
+import os, sys, argparse, textwrap, subprocess, json
+from datetime import datetime
+from pathlib import Path
+
+HOME = Path.home()
+REPO = HOME / "Zes-Orchestration-System"
+
+
+def run_cmd(cmd, cwd=None, timeout=30):
+    """Run a shell command and return (returncode, stdout, stderr)."""
+    try:
+        proc = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                              cwd=cwd or REPO, timeout=timeout)
+        return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return -1, "", "Timeout"
+    except Exception as e:
+        return -1, "", str(e)
+
+
+def get_repo_state():
+    """Get current repo state."""
+    state = {}
+    
+    # Branch
+    code, out, _ = run_cmd("git branch --show-current")
+    state["branch"] = out if code == 0 else "(detached)"
+    
+    # Status
+    code, out, _ = run_cmd("git status --porcelain")
+    state["changes"] = [l for l in out.split("\n") if l.strip()] if code == 0 else []
+    
+    # Staged
+    code, out, _ = run_cmd("git diff --cached --stat")
+    state["staged"] = out if code == 0 else ""
+    
+    # Unstaged
+    code, out, _ = run_cmd("git diff --stat")
+    state["unstaged"] = out if code == 0 else ""
+    
+    # Untracked
+    state["untracked"] = [l for l in state["changes"] if l.startswith("??")] if state["changes"] else []
+    
+    # Recent commits
+    code, out, _ = run_cmd("git log --oneline -5")
+    state["recent"] = out.split("\n") if code == 0 else []
+    
+    # Divergence
+    code, out, _ = run_cmd("git rev-list --count HEAD..@{u} 2>/dev/null || echo 0")
+    state["behind"] = int(out) if out.isdigit() else 0
+    
+    code, out, _ = run_cmd("git rev-list --count @{u}..HEAD 2>/dev/null || echo 0")
+    state["ahead"] = int(out) if out.isdigit() else 0
+    
+    # Last push time
+    code, out, _ = run_cmd("git log -1 --format=%ci origin/main 2>/dev/null || echo never")
+    state["last_push"] = out
+    
+    return state
+
+
+def categorize_changes(changes):
+    """Categorize changes by type for commit message generation."""
+    categories = {
+        "feat": [],
+        "fix": [],
+        "docs": [],
+        "chore": [],
+        "refactor": [],
+        "test": [],
+        "style": [],
+    }
+    
+    for line in changes:
+        path = line[3:] if len(line) > 3 else line
+        name = Path(path).name.lower()
+        
+        if any(x in name for x in ["fix", "bug", "error", "issue", "broken"]):
+            categories["fix"].append(path)
+        elif any(x in path for x in ["doc", "readme", "skil", "roadmap"]):
+            categories["docs"].append(path)
+        elif any(x in name for x in ["test", "spec", "check"]):
+            categories["test"].append(path)
+        elif any(x in name for x in ["refactor", "clean", "restruct"]):
+            categories["refactor"].append(path)
+        elif any(x in name for x in ["style", "format", "lint"]):
+            categories["style"].append(path)
+        else:
+            categories["feat"].append(path)
+    
+    return categories
+
+
+def generate_commit_message(state):
+    """Generate an AI-style commit message from repo state."""
+    changes = state["changes"]
+    cats = categorize_changes(changes)
+    
+    # Determine primary type
+    primary = None
+    for t in ["feat", "fix", "refactor", "docs", "test", "style", "chore"]:
+        if cats.get(t):
+            primary = t
+            break
+    
+    # Build scope from file names
+    files_changed = [c[3:] for c in changes]
+    scopes = set()
+    for f in files_changed:
+        parts = f.split("/")
+        if len(parts) >= 2:
+            scopes.add(parts[0])
+    
+    scope_str = ", ".join(sorted(scopes)[:3]) if scopes else "core"
+    
+    # Count changes
+    added = len([c for c in changes if c.startswith("A") or c.startswith("??") or c.startswith(" M")])
+    modified = len([c for c in changes if not c.startswith("??")])
+    
+    # Build description from file names
+    desc_parts = []
+    if cats.get("feat"):
+        feat_names = [Path(p).stem for p in cats["feat"][:3]]
+        desc_parts.append(f"{', '.join(feat_names)}")
+    if cats.get("fix"):
+        fix_names = [Path(p).stem for p in cats["fix"][:2]]
+        desc_parts.append(f"fix {', '.join(fix_names)}")
+    if cats.get("docs"):
+        desc_parts.append("docs update")
+    if cats.get("refactor"):
+        desc_parts.append("refactor")
+    
+    desc = " — ".join(desc_parts) if desc_parts else "various updates"
+    
+    # Generate conventional commit message
+    msg = f"{primary}({scope_str}): {desc}"
+    
+    # Details
+    details = []
+    for t, label in [("feat", "Features"), ("fix", "Bug fixes"), ("docs", "Documentation"),
+                     ("refactor", "Refactoring"), ("test", "Tests"), ("style", "Style")]:
+        if cats.get(t):
+            files = [Path(p).name for p in cats[t][:3]]
+            details.append(f"  {label}: {', '.join(files)}")
+            if len(cats[t]) > 3:
+                details.append(f"           + {len(cats[t]) - 3} more")
+    
+    details_str = "\n".join(details)
+    
+    full_msg = f"{msg}\n\n{details_str}" if details else msg
+    
+    return full_msg
+
+
+def run_push(dry_run=False, no_push=False, deploy=False, deploy_script=None, message=None):
+    """Run the push workflow."""
+    print(f"\n{'='*60}")
+    print(f"  📤 ZES Push")
+    print(f"{'='*60}\n")
+    
+    # Check repo
+    if not (REPO / ".git").exists():
+        print(f"  ❌ Not a git repository: {REPO}")
+        sys.exit(1)
+    
+    state = get_repo_state()
+    
+    print(f"  📂 Repo:      {state['branch']} branch")
+    print(f"  📍 Remote:    {'ahead by ' + str(state['ahead']) + ' commits' if state['ahead'] > 0 else 'synced'}")
+    print(f"               {'behind by ' + str(state['behind']) + ' commits — pull first!' if state['behind'] > 0 else ''}")
+    print(f"  📊 Changes:   {len(state['changes'])} ({len(state['untracked'])} untracked)")
+    
+    if not state["changes"] and not state["staged"]:
+        print(f"\n  ✨ Nothing to commit — working tree clean")
+        return
+    
+    if state["behind"] > 0:
+        print(f"\n  ⚠️  Branch is behind by {state['behind']} commits. Pull first:")
+        print(f"     git pull origin {state['branch']}")
+        if not dry_run:
+            resp = input(f"\n  Continue anyway? [y/N] ")
+            if resp.lower() != "y":
+                print("  Aborted.")
+                return
+    
+    # Dry run
+    if dry_run:
+        print(f"\n  ┌{'─'*56}┐")
+        print(f"  │ 📋 DRY RUN — Would commit:                          │")
+        print(f"  └{'─'*56}┘")
+        print(f"\n  Changes:")
+        for c in state["changes"][:20]:
+            print(f"    {c}")
+        if len(state["changes"]) > 20:
+            print(f"    ... and {len(state['changes']) - 20} more")
+        print(f"\n  Generated message:\n")
+        print(f"  {textwrap.indent(generate_commit_message(state), '    ')}")
+        print()
+        return
+    
+    # Stage all changes
+    print(f"\n  📦 Staging all changes...")
+    rc, out, err = run_cmd("git add -A")
+    if rc != 0:
+        print(f"  ❌ git add failed: {err}")
+        sys.exit(1)
+    print(f"  ✅ Staged {len(state['changes'])} files")
+    
+    # Generate or use provided message
+    if message:
+        msg = message
+    else:
+        msg = generate_commit_message(state)
+    
+    # Commit
+    print(f"\n  💾 Committing...")
+    # Use temp file to avoid shell quoting issues
+    msg_file = HOME / ".zes" / ".commit_msg.tmp"
+    msg_file.parent.mkdir(parents=True, exist_ok=True)
+    msg_file.write_text(msg)
+    
+    rc, out, err = run_cmd(f"git commit -F {msg_file}")
+    msg_file.unlink(missing_ok=True)
+    
+    if rc != 0:
+        print(f"  ❌ Commit failed: {err}")
+        print(f"  Message was:\n{textwrap.indent(msg, '    ')}")
+        sys.exit(1)
+    
+    # Show commit
+    rc, commit_out, _ = run_cmd("git log -1 --oneline")
+    print(f"  ✅ {commit_out}")
+    print(f"     {msg.split(chr(10))[0]}")
+    
+    if no_push:
+        print(f"\n  📍 Skipping push (--no-push)")
+        return
+    
+    # Push
+    print(f"\n  📤 Pushing to origin/{state['branch']}...")
+    rc, out, err = run_cmd(f"git push origin {state['branch']}", timeout=30)
+    
+    if rc != 0:
+        if "error" in err.lower():
+            print(f"  ❌ Push failed: {err[:200]}")
+            sys.exit(1)
+        print(f"  ⚠️  Push result: {out or err[:200]}")
+    else:
+        print(f"  ✅ Pushed successfully")
+    
+    # Deploy
+    if deploy:
+        print(f"\n  🚀 Deploying...")
+        script = deploy_script or str(HOME / ".local" / "bin" / "zes-deploy")
+        
+        if os.path.exists(script):
+            rc, out, err = run_cmd(f"bash {script}", timeout=120)
+            if rc != 0:
+                print(f"  ❌ Deploy failed: {err[:200]}")
+            else:
+                print(f"  ✅ Deploy complete")
+                if out:
+                    print(f"     {out.replace(chr(10), chr(10) + '     ')}")
+        else:
+            print(f"  ⚠️  No deploy script at {script}")
+    
+    # Summary
+    state_after = get_repo_state()
+    print(f"\n{'─'*60}")
+    print(f"  📊 After push: {len(state_after['changes'])} changes remaining "
+          f"| ahead by {state_after['ahead']}")
+    print(f"{'─'*60}\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="ZES Push — One-command git commit + push + deploy",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            Examples:
+              zes push                  # Auto-commit all with AI message
+              zes push "fix typo"       # Manual commit message
+              zes push --dry-run        # Preview what would happen
+              zes push --no-push        # Commit only, no push
+              zes push --deploy         # Commit + push + deploy
+        """),
+    )
+    parser.add_argument("message", nargs="?", help="Commit message (omit for AI-generated)")
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Show what would be committed")
+    parser.add_argument("--no-push", "-np", action="store_true", help="Commit but don't push")
+    parser.add_argument("--deploy", "-d", action="store_true", help="Run deploy after push")
+    parser.add_argument("--deploy-script", help="Custom deploy script path")
+    
+    args = parser.parse_args()
+    
+    run_push(dry_run=args.dry_run, no_push=args.no_push, 
+             deploy=args.deploy, deploy_script=args.deploy_script,
+             message=args.message)
+
+
+if __name__ == "__main__":
+    main()

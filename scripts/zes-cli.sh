@@ -62,6 +62,10 @@ case "${cmd}" in
     shift
     exec python3 "$HOME/.local/bin/zes-bench" "$@"
     ;;
+  push)
+    shift
+    exec python3 "$HOME/.local/bin/zes-push" "$@"
+    ;;
   status|st)
     shift
     exec python3 "$HOME/.local/bin/zes-status" "$@"
