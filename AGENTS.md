@@ -1,13 +1,13 @@
-# ZES System — Unified Agent Instructions
+# ZES Orchestration System — Unified Agent Instructions
 
-**Version:** 3.5.0  
-**Scope:** This file governs all agents operating within the ZES (ZES Enterprise System) environment. It supersedes individual AGENTS.md files where conflicts exist.
+**Version:** 3.6.1  
+**Scope:** This file governs all agents operating within the ZES Orchestration System environment. It supersedes individual AGENTS.md files where conflicts exist.
 
 ---
 
 ## 1. System Overview
 
-ZES is a unified personal AI system running on Termux (Android). It orchestrates three primary agents — **Codex CLI**, **Hermes Agent**, and **Claude Code** — plus supporting services (9Router AI Gateway, amux Agent Control Plane, ZES Dashboard).
+ZES Orchestration System is a unified personal AI system running on Termux (Android). It orchestrates three primary agents — **Codex CLI**, **Hermes Agent**, and **Claude Code** — plus supporting services (BitRouter AI Gateway, AI-Proxy, Tor/IP rotation, ZES Dashboard).
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -44,8 +44,8 @@ ZES is a unified personal AI system running on Termux (Android). It orchestrates
 1. **Codex is the primary coder** — Execution, planning, file editing, repo work
 2. **Claude Code is the secondary coder** — Code review, parallel tasks, multi-agent orchestration
 3. **Hermes is the memory hub & orchestrator** — All memories flow through ZESMemoryProvider
-4. **9Router is the AI gateway** — Routes all LLM requests, manages API keys
-5. **amux is the agent control plane** — Runs, monitors, and orchestrates parallel agent sessions
+4. **BitRouter + AI-Proxy is the AI gateway** — BitRouter (:4356) routes OpenAI + Gemini via zero-config; AI-Proxy (:20129) routes Groq, OpenRouter, Mistral, NVIDIA via Python proxy
+5. **Tor + iprotate is the privacy/IP rotation layer** — Routes selected providers through Tor exit nodes, rotates IP every 15 minutes
 6. **Skills are shared** — 81 skills across 14 categories, available to all agents
 7. **Services communicate via HTTP/WebSocket** — REST APIs, file-based bridges
 
@@ -86,25 +86,24 @@ ZES is a unified personal AI system running on Termux (Android). It orchestrates
 - **Memory provider:** holographic → `~/.zes/memory_hub.sqlite`
 - **Cron:** Memory sync every 30 min
 
-### 9Router AI Gateway
-- **Path:** `~/9router/`
-- **Port:** `:20128` (OpenAI-compatible endpoint)
-- **Providers:** OpenAI, Anthropic, Groq, DeepSeek, Gemini, and 30+ more
-- **Config:** `~/9router/.env`, `~/9router/data/`
+### BitRouter AI Gateway
+- **Binary:** `~/.local/bin/bitrouter` (v1.0.0-alpha.27, aarch64 glibc)
+- **Wrapper:** `~/.local/bin/bitrouter.sh` (grun + SSL_CERT_FILE)
+- **Port:** `:4356` (OpenAI-compatible endpoint — auto-detect zero-config)
+- **Auto-detected providers:** OpenAI (GPT-5.5, o-series, etc.), Google Gemini (all models)
+- **Config:** Zero-config mode (no `bitrouter.yaml` needed)
+- **runsv:** `/data/data/com.termux/files/usr/var/service/bitrouter/run`
 
-### amux Agent Control Plane
-- **Path:** `~/amux-fresh/`
-- **Port:** `:8822` (web dashboard)
-- **Config:** `~/.amux/config.yaml`
-- **Projects:** zes-system, workspace, claude-code, codex
-- **Features:** Self-healing watchdog, kanban board, session management
+### AI-Proxy
+- **Path:** `~/.local/bin/ai-proxy.py`
+- **Port:** `:20129` (OpenAI-compatible endpoint)
+- **Providers:** Groq, OpenRouter (342 models), Mistral, NVIDIA NIM (118 models), LLM7
+- **runsv:** `/data/data/com.termux/files/usr/var/service/ai-proxy/run`
 
-### ZES Dashboard
-- **Stack:** React 19 + shadcn/ui + Vite 8 + Tailwind CSS v4
-- **Port:** `:5050` (Vite dev server)
-- **Source:** `~/zes-system-v2/`
-- **Backend:** Flask API on `:5002` (runit: `zes-flask-api`)
-- **Pages:** Dashboard, Processes, System, Services, Skills Manager, Hermes Chat, 9Router, Design Studio, Kanban, Claude, Architecture
+### Tor + IP Rotation
+- **Tor Ports:** `:9050` (SOCKS5), `:9051` (Control — NEWNYM)
+- **iprotate:** runsv service that rotates Tor exit IP every 15 minutes
+- **Rate-limit bypass:** Multiple accounts across providers + IP rotation through Tor exit nodes
 
 ---
 
