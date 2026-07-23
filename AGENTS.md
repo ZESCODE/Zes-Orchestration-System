@@ -1,6 +1,6 @@
 # ZES Orchestration System — Unified Agent Instructions
 
-**Version:** 3.6.1  
+**Version:** 3.7.0  
 **Scope:** This file governs all agents operating within the ZES Orchestration System environment. It supersedes individual AGENTS.md files where conflicts exist.
 
 ---
@@ -10,33 +10,35 @@
 ZES Orchestration System is a unified personal AI system running on Termux (Android). It orchestrates three primary agents — **Codex CLI**, **Hermes Agent**, and **Claude Code** — plus supporting services (BitRouter AI Gateway, AI-Proxy, Tor/IP rotation, ZES Dashboard).
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                    ZES System v3.6                      │
-│                                                       │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐            │
-│  │  Codex   │  │  Hermes  │  │ Claude   │            │
-│  │  CLI     │  │  Agent   │  │  Code    │            │
-│  │ (coder)  │  │(orchestr)│  │ (review) │            │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘            │
-│       │             │             │                   │
-│       └─────────┬───┴─────────────┘                   │
-│                 ▼                                      │
-│       ┌──────────────────┐                            │
-│       │  ZES Memory Hub   │  (unified memory)          │
-│       └──────────────────┘                            │
-│                                                       │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────────┐    │
-│  │BitRouter │  │ AI-Proxy │  │ ZES Dashboard    │    │
-│  │ :4356    │  │ :20129   │  │ (shadcn + Vite)  │    │
-│  │GPT+Gemini│  │Groq+OR+  │  │ :5050            │    │
-│  │          │  │Mistral+NV│  │                   │    │
-│  └──────────┘  └──────────┘  └──────────────────┘    │
-│                                                       │
-│  ┌──────────┐  ┌──────────┐                           │
-│  │   Tor    │  │iprotate  │  ← IP rotation layer      │
-│  │ :9050    │  │15min     │                           │
-│  └──────────┘  └──────────┘                           │
-└──────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│                    ZES System v3.7                          │
+│                                                           │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐                │
+│  │  Codex   │  │  Hermes  │  │ Claude   │                │
+│  │  CLI     │  │  Agent   │  │  Code    │                │
+│  │ (coder)  │  │(orchestr)│  │ (review) │                │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘                │
+│       │             │             │                       │
+│       └─────────┬───┴─────────────┘                       │
+│                 ▼                                          │
+│       ┌──────────────────┐                                │
+│       │  ZES Memory Hub   │  (unified memory)              │
+│       │  ~/.zes/memory   │  100 consolidated facts         │
+│       └──────────────────┘                                │
+│                                                           │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────────┐        │
+│  │BitRouter │  │ AI-Proxy │  │ ZES CLI Toolkit   │        │
+│  │ :4356    │  │ :20129   │  │ research | batch  │        │
+│  │GPT+Gemini│  │Groq+OR+  │  │ consolidate       │        │
+│  │          │  │Mistral+NV│  │ (6 cloud providers)│        │
+│  │          │  │+GitHub   │  │                   │        │
+│  └──────────┘  └──────────┘  └──────────────────┘        │
+│                                                           │
+│  ┌──────────┐  ┌──────────┐                               │
+│  │   Tor    │  │iprotate  │  ← IP rotation layer           │
+│  │ :9050 ✓  │  │15min     │                               │
+│  └──────────┘  └──────────┘                               │
+└───────────────────────────────────────────────────────────┘
 ```
 
 ### Architecture Principles
@@ -44,10 +46,11 @@ ZES Orchestration System is a unified personal AI system running on Termux (Andr
 1. **Codex is the primary coder** — Execution, planning, file editing, repo work
 2. **Claude Code is the secondary coder** — Code review, parallel tasks, multi-agent orchestration
 3. **Hermes is the memory hub & orchestrator** — All memories flow through ZESMemoryProvider
-4. **BitRouter + AI-Proxy is the AI gateway** — BitRouter (:4356) routes OpenAI + Gemini via zero-config; AI-Proxy (:20129) routes Groq, OpenRouter, Mistral, NVIDIA via Python proxy
-5. **Tor + iprotate is the privacy/IP rotation layer** — Routes selected providers through Tor exit nodes, rotates IP every 15 minutes
-6. **Skills are shared** — 81 skills across 14 categories, available to all agents
-7. **Services communicate via HTTP/WebSocket** — REST APIs, file-based bridges
+4. **BitRouter + AI-Proxy is the AI gateway** — BitRouter (:4356) routes OpenAI + Gemini via zero-config; AI-Proxy (:20129) routes Groq, OpenRouter, Mistral, NVIDIA, GitHub Models via Python proxy
+5. **Tor + iprotate is the privacy/IP rotation layer** — Routes selected providers through Tor exit nodes, rotates IP every 15 minutes. Fixed and running.
+6. **ZES CLI Toolkit provides cloud AI capabilities** — `zes research` (parallel sub-agents), `zes batch` (round-robin processing), `zes consolidate` (memory hub maintenance)
+7. **Skills are shared** — 97+ skills across 15 categories, including new ZES-specific tools
+8. **Services communicate via HTTP/WebSocket** — REST APIs, file-based bridges
 
 ---
 
@@ -97,13 +100,26 @@ ZES Orchestration System is a unified personal AI system running on Termux (Andr
 ### AI-Proxy
 - **Path:** `~/.local/bin/ai-proxy.py`
 - **Port:** `:20129` (OpenAI-compatible endpoint)
-- **Providers:** Groq, OpenRouter (342 models), Mistral, NVIDIA NIM (118 models), LLM7
+- **Providers:** Groq, OpenRouter (342 models), Mistral, NVIDIA NIM (118 models), GitHub Models (GPT-4.1, GPT-4.1-mini)
 - **runsv:** `/data/data/com.termux/files/usr/var/service/ai-proxy/run`
 
 ### Tor + IP Rotation
 - **Tor Ports:** `:9050` (SOCKS5), `:9051` (Control — NEWNYM)
+- **Status:** ✅ Fixed and running (removed `down` file)
 - **iprotate:** runsv service that rotates Tor exit IP every 15 minutes
 - **Rate-limit bypass:** Multiple accounts across providers + IP rotation through Tor exit nodes
+
+### ZES CLI Toolkit
+The `zes` command provides unified access to all ZES cloud AI capabilities:
+
+| Command | Tool | What It Does |
+|---------|------|-------------|
+| `zes research "topic"` | Parallel Research Engine | Spawns 3-6 sub-agents across 5+ providers, synthesizes report |
+| `zes batch tasks.txt` | Cloud Hyperswarm Batch | Round-robins 100+ tasks across all providers (~60/min) |
+| `zes consolidate` | Memory Consolidator | 3-agent parallel scan finds duplicates/contradictions in memory hub |
+
+- **Scripts:** `~/.local/bin/zes`, `~/.local/bin/zes-research`, `~/.local/bin/zes-batch`, `~/.local/bin/zes-consolidate`
+- **Skills:** `ZES-parallel-research`, `ZES-model-router`, `ZES-memory-consolidator`
 
 ---
 
