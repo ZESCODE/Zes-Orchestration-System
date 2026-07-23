@@ -1,0 +1,584 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""
+ZES Benchmark — 3-Agent Performance Testing Engine.
+
+Spawns 3 parallel AI agents to benchmark system performance:
+  Provider Benchmarker → LLM response times across all providers
+  Service Benchmarker  → Endpoint response times, uptime, throughput
+  Resource Monitor     → CPU, RAM, disk, process analysis
+
+Usage:
+  zes bench                                # Full benchmark
+  zes bench --quick                        # Quick benchmark (providers only)
+  zes bench --providers                    # Benchmark providers only
+  zes bench --services                     # Benchmark services only
+  zes bench --resources                    # Resource monitoring only
+  zes bench --save ~/bench-report.md       # Save report to file
+  zes bench --url http://localhost:20129   # Custom service URL
+"""
+
+import asyncio, json, os, sys, argparse, textwrap, subprocess, re, time
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+# ─── AI Provider Config ──────────────────────────────────────────
+
+BENCH_PROVIDERS = {
+    "provider_bench": {
+        "url": os.environ.get("PROV_BENCH_URL", "https://api.groq.com/openai/v1/chat/completions"),
+        "model": os.environ.get("PROV_BENCH_MODEL", "llama-3.3-70b-versatile"),
+        "env_key": "GROQ_API_KEY",
+        "name": "Provider Benchmarker (Groq Llama 3.3)",
+    },
+    "service_bench": {
+        "url": os.environ.get("SVC_BENCH_URL", "https://openrouter.ai/api/v1/chat/completions"),
+        "model": os.environ.get("SVC_BENCH_MODEL", "deepseek/deepseek-v4-flash"),
+        "env_key": "OPENROUTER_API_KEY",
+        "name": "Service Benchmarker (OpenRouter DeepSeek V4)",
+    },
+    "resource_monitor": {
+        "url": os.environ.get("RESOURCE_URL", "https://api.llm7.io/v1/chat/completions"),
+        "model": os.environ.get("RESOURCE_MODEL", "codestral-latest"),
+        "env_key": "LLM7_API_KEY",
+        "name": "Resource Monitor (LLM7 Codestral)",
+    },
+}
+
+# ─── Provider Endpoints ──────────────────────────────────────────
+
+PROVIDER_TESTS = [
+    {
+        "name": "Groq (Llama 3.3)",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "model": "llama-3.3-70b-versatile",
+        "env_key": "GROQ_API_KEY",
+        "auth": "Bearer",
+    },
+    {
+        "name": "OpenRouter (DeepSeek V4)",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "deepseek/deepseek-v4-flash",
+        "env_key": "OPENROUTER_API_KEY",
+        "auth": "Bearer",
+        "extra_headers": {"HTTP-Referer": "https://github.com/ZESCODE/Zes-Orchestration-System"},
+    },
+    {
+        "name": "LLM7 (Codestral)",
+        "url": "https://api.llm7.io/v1/chat/completions",
+        "model": "codestral-latest",
+        "env_key": "LLM7_API_KEY",
+        "auth": "Bearer",
+    },
+    {
+        "name": "OpenCode Zen (MiMo)",
+        "url": "https://opencode.ai/zen/v1/chat/completions",
+        "model": "mimo-v2.5-free",
+        "env_key": "OPENCODE_ZEN_KEY",
+        "auth": "X-API-Key",
+    },
+]
+
+# ─── Agent Prompts ───────────────────────────────────────────────
+
+PROVIDER_BENCH_PROMPT = """You are the **Provider Benchmarker** in a 3-agent Benchmarking team.
+
+Your job: Analyze LLM provider benchmark results.
+
+Benchmark results:
+{bench_data}
+
+Think about:
+1. **Response Times** — Which providers are fastest/slowest? Average, min, max?
+2. **Reliability** — Which providers have the most consistent response times?
+3. **Ranking** — Rank providers by speed (fastest to slowest)
+4. **Recommendations** — Which provider for latency-sensitive vs throughput tasks?
+
+Output:
+- RANKING: Providers ranked by speed (numbered)
+- AVERAGE_TIMES: Response time per provider (table)
+- RELIABILITY: Consistency analysis (stable / variable / unreliable)
+- OBSERVATIONS: Performance observations (numbered)
+- RECOMMENDATIONS: Which provider for what task
+- OVERALL: One-sentence benchmark verdict"""
+
+SERVICE_BENCH_PROMPT = """You are the **Service Benchmarker** in a 3-agent Benchmarking team.
+
+Your job: Analyze service endpoint performance.
+
+Service data:
+{service_data}
+
+Think about:
+1. **Uptime** — Which services are up/down?
+2. **Response Times** — How fast do services respond?
+3. **Throughput** — Estimated requests per second?
+4. **Bottlenecks** — Which services are slowest?
+5. **Health** — Overall service mesh health
+
+Output:
+- SERVICE_STATUS: Table of services (name, status, response time)
+- UPTIME: Which services are healthy
+- BOTTLENECKS: Slowest services (numbered)
+- THROUGHPUT: Estimated capacity
+- RECOMMENDATIONS: Performance improvements
+- OVERALL: One-sentence service benchmark verdict"""
+
+RESOURCE_PROMPT = """You are the **Resource Monitor** in a 3-agent Benchmarking team.
+
+Your job: Analyze system resource usage.
+
+Resource data:
+{resource_data}
+
+Think about:
+1. **CPU** — Is CPU under load? Which processes consume the most?
+2. **Memory** — Is RAM sufficient? Any memory leaks?
+3. **Disk** — Is disk space adequate? I/O bottlenecks?
+4. **Processes** — Which ZES processes are resource-heavy?
+5. **Capacity** — Is there headroom for more services?
+
+Output:
+- CPU: Current usage, top consumers, assessment
+- MEMORY: RAM usage, swap, assessment
+- DISK: Storage usage, assessment
+- PROCESSES: ZES processes resource usage (table)
+- CAPACITY: Headroom assessment (plenty / adequate / tight / critical)
+- RECOMMENDATIONS: Resource optimizations
+- OVERALL: One-sentence resource verdict"""
+
+
+# ─── Benchmark Runners ───────────────────────────────────────────
+
+def run_provider_benchmarks() -> str:
+    """Benchmark all LLM providers."""
+    import urllib.request
+    
+    results = []
+    results.append(f"Provider Benchmarks ({datetime.now().strftime('%H:%M:%S')}):\n")
+    
+    test_prompt = {"role": "user", "content": "Reply with exactly: Hello from ZES"}
+    
+    for prov in PROVIDER_TESTS:
+        key = os.environ.get(prov["env_key"])
+        if not key:
+            results.append(f"  ⚠️  {prov['name']}: No API key ({prov['env_key']})")
+            continue
+        
+        payload = {
+            "model": prov["model"],
+            "messages": [test_prompt],
+            "max_tokens": 10,
+            "temperature": 0,
+        }
+        
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "ZES-Benchmark/1.0",
+        }
+        
+        if prov["auth"] == "X-API-Key":
+            headers["X-API-Key"] = key
+        else:
+            headers["Authorization"] = f"Bearer {key}"
+        
+        if "extra_headers" in prov:
+            headers.update(prov["extra_headers"])
+        
+        # Warmup ping (just check connectivity)
+        total_time = 0
+        success = False
+        status = "unknown"
+        
+        for attempt in range(3):
+            try:
+                start = time.time()
+                data = json.dumps(payload).encode()
+                req = urllib.request.Request(prov["url"], data=data, headers=headers)
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    resp_data = json.loads(resp.read().decode())
+                    elapsed = (time.time() - start) * 1000
+                    total_time += elapsed
+                    content = resp_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    success = True
+                    status = f"{elapsed:.0f}ms"
+            except urllib.request.HTTPError as e:
+                status = f"HTTP {e.code}"
+                break
+            except Exception as e:
+                status = f"Error: {str(e)[:40]}"
+                break
+        
+        avg_time = total_time / (attempt + 1) if success else 0
+        icon = "🟢" if success else "🔴"
+        results.append(f"  {icon} {prov['name']}: {status}")
+        if success:
+            results.append(f"      Model: {prov['model']}")
+            if content:
+                results.append(f"      Response: \"{content.strip()}\"")
+    
+    return "\n".join(results)
+
+
+def run_service_benchmarks(custom_url: Optional[str] = None) -> str:
+    """Benchmark all running services."""
+    import urllib.request
+    
+    results = []
+    results.append(f"Service Benchmarks ({datetime.now().strftime('%H:%M:%S')}):\n")
+    
+    services = [
+        {"name": "BitRouter", "url": custom_url or "http://127.0.0.1:4356", "test": "/v1/models"},
+        {"name": "AI-Proxy", "url": custom_url or "http://127.0.0.1:20129", "test": "/v1/models"},
+        {"name": "OpenClaude Dashboard", "url": "http://127.0.0.1:5050", "test": ""},
+        {"name": "Claude Chat", "url": "http://127.0.0.1:3000", "test": ""},
+        {"name": "Hermes Dashboard", "url": "http://127.0.0.1:9119", "test": ""},
+        {"name": "amux", "url": "http://127.0.0.1:8822", "test": "/api/health"},
+    ]
+    
+    for svc in services:
+        url = svc["url"] + svc["test"]
+        start = time.time()
+        status = "unknown"
+        elapsed = 0
+        
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                elapsed = (time.time() - start) * 1000
+                status = f"{elapsed:.0f}ms"
+        except urllib.request.HTTPError as e:
+            elapsed = (time.time() - start) * 1000
+            status = f"{elapsed:.0f}ms (HTTP {e.code})"
+        except Exception as e:
+            status = f"DOWN ({str(e)[:30]})"
+        
+        icon = "🟢" if "ms" in status and "DOWN" not in status else "🔴" if "DOWN" in status else "🟡"
+        results.append(f"  {icon} {svc['name']}: {status}")
+    
+    # Check runsv services
+    try:
+        proc = subprocess.run(["sv", "status", "bitrouter", "ai-proxy", "tor"],
+                             capture_output=True, text=True, timeout=5)
+        if proc.stdout.strip():
+            results.append(f"\n  📋 runsv Daemons:")
+            for line in proc.stdout.strip().split("\n"):
+                status_icon = "🟢" if "run" in line else "🔴"
+                results.append(f"    {status_icon} {line}")
+    except:
+        pass
+    
+    return "\n".join(results)
+
+
+def run_resource_monitoring() -> str:
+    """Monitor system resources."""
+    results = []
+    results.append(f"Resource Monitor ({datetime.now().strftime('%H:%M:%S')}):\n")
+    
+    # CPU
+    try:
+        proc = subprocess.run(["top", "-bn1"], capture_output=True, text=True, timeout=5)
+        cpu_lines = [l for l in proc.stdout.split("\n") if "%Cpu" in l]
+        if cpu_lines:
+            results.append(f"  🖥️  CPU: {cpu_lines[0].strip()}")
+        
+        # Top CPU processes
+        proc2 = subprocess.run(["ps", "aux", "--sort=-%cpu", "|", "head", "-6"],
+                               shell=True, capture_output=True, text=True, timeout=5)
+        lines = proc2.stdout.strip().split("\n")
+        if len(lines) >= 2:
+            results.append(f"  Top CPU processes:")
+            for line in lines[1:6]:
+                results.append(f"    {line[:100]}")
+    except:
+        results.append("  🖥️  CPU: Could not measure")
+    
+    # Memory
+    try:
+        proc = subprocess.run(["free", "-h"], capture_output=True, text=True, timeout=5)
+        for line in proc.stdout.strip().split("\n"):
+            results.append(f"  🧠 {line}")
+        
+        proc2 = subprocess.run(["ps", "aux", "--sort=-%mem", "|", "head", "-6"],
+                               shell=True, capture_output=True, text=True, timeout=5)
+        lines = proc2.stdout.strip().split("\n")
+        if len(lines) >= 2:
+            results.append(f"  Top memory processes:")
+            for line in lines[1:6]:
+                results.append(f"    {line[:100]}")
+    except:
+        results.append("  🧠 Memory: Could not measure")
+    
+    # Disk
+    try:
+        proc = subprocess.run(["df", "-h", "/data/data/com.termux/files/home"],
+                             capture_output=True, text=True, timeout=5)
+        for line in proc.stdout.strip().split("\n"):
+            results.append(f"  💾 {line}")
+    except:
+        results.append("  💾 Disk: Could not measure")
+    
+    # ZES-specific processes
+    try:
+        proc = subprocess.run(["ps", "aux", "|", "grep", "-E", "'python|node|bitrouter|ai-proxy|tor'", "|", "grep", "-v", "grep"],
+                             shell=True, capture_output=True, text=True, timeout=5)
+        zel_lines = [l for l in proc.stdout.strip().split("\n") if l.strip()]
+        if zel_lines:
+            results.append(f"\n  🔷 ZES Processes ({len(zel_lines)}):")
+            for line in zel_lines[:10]:
+                fields = line.split()
+                if len(fields) >= 11:
+                    pid = fields[1]
+                    cpu = fields[2]
+                    mem = fields[3]
+                    cmd = " ".join(fields[10:])[:50]
+                    results.append(f"    PID:{pid} CPU:{cpu}% MEM:{mem}%  {cmd}")
+    except:
+        pass
+    
+    # Uptime
+    try:
+        proc = subprocess.run(["uptime"], capture_output=True, text=True, timeout=5)
+        results.append(f"\n  ⏱  {proc.stdout.strip()}")
+    except:
+        pass
+    
+    return "\n".join(results)
+
+
+# ─── AI Provider Call ────────────────────────────────────────────
+
+async def call_provider(name: str, prompt: str, timeout: int = 60) -> Optional[str]:
+    """Call an AI benchmark agent."""
+    import urllib.request
+    
+    cfg = BENCH_PROVIDERS.get(name)
+    if not cfg:
+        return f"[ERROR: Unknown provider '{name}']"
+    
+    key = os.environ.get(cfg["env_key"])
+    if not key:
+        return f"[ERROR: Missing API key {cfg['env_key']}]"
+    
+    payload = {
+        "model": cfg["model"],
+        "messages": [
+            {"role": "system", "content": "You are a benchmarking specialist. Be quantitative, comparative, and actionable. Always include specific numbers and rankings."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 2048,
+    }
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {key}",
+        "User-Agent": "ZES-Benchmark/1.0",
+    }
+    
+    if "openrouter" in name or "openrouter" in cfg.get("url", ""):
+        headers["HTTP-Referer"] = "https://github.com/ZESCODE/Zes-Orchestration-System"
+        headers["X-Title"] = "ZES Benchmark"
+    
+    try:
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(cfg["url"], data=data, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp_data = json.loads(resp.read().decode())
+            content = resp_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return content or "[No content returned]"
+    except Exception as e:
+        return f"[ERROR: {name} failed — {e}]"
+
+
+# ─── Main Benchmark Logic ────────────────────────────────────────
+
+async def run_benchmark(quick: bool = False, providers_only: bool = False,
+                        services_only: bool = False, resources_only: bool = False,
+                        save_path: Optional[str] = None, custom_url: Optional[str] = None,
+                        verbose: bool = False):
+    """Run 3-agent benchmark."""
+    start = datetime.now()
+    
+    mode = "Full" if not (providers_only or services_only or resources_only) else \
+           "Providers" if providers_only else "Services" if services_only else "Resources"
+    
+    print(f"\n{'='*60}")
+    print(f"  ⏱  ZES 3-Agent Benchmark ({mode})")
+    print(f"{'='*60}")
+    print(f"  Time:   {start.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*60}\n")
+    
+    # Run benchmarks
+    print(f"  📊 Running local benchmarks...\n")
+    
+    bench_data = ""
+    service_data = ""
+    resource_data = ""
+    
+    if not services_only and not resources_only:
+        bench_data = run_provider_benchmarks()
+        print(f"  🟢 Provider benchmarks done")
+    
+    if not providers_only and not resources_only:
+        service_data = run_service_benchmarks(custom_url)
+        print(f"  🟢 Service benchmarks done")
+    
+    if not providers_only and not services_only:
+        resource_data = run_resource_monitoring()
+        print(f"  🟢 Resource monitoring done")
+    
+    total_elapsed = (datetime.now() - start).total_seconds()
+    
+    if verbose:
+        if bench_data:
+            print(f"\n{textwrap.indent(bench_data[:500], '  ')}")
+        if service_data:
+            print(f"\n{textwrap.indent(service_data[:500], '  ')}")
+        if resource_data:
+            print(f"\n{textwrap.indent(resource_data[:500], '  ')}")
+    
+    if quick:
+        # Print results directly without AI
+        print(f"\n  ⚡ Quick mode — local benchmarks only, no AI analysis\n")
+        print(f"{'='*60}")
+        print(f"  📋 BENCHMARK RESULTS ({total_elapsed:.0f}s)")
+        print(f"{'='*60}\n")
+        if bench_data:
+            print(f"  ┌{'─'*56}┐")
+            print(f"  │ ⚡ PROVIDER BENCHMARKS                          │")
+            print(f"  └{'─'*56}┘\n")
+            print(f"{textwrap.indent(bench_data, '  ')}")
+        if service_data:
+            print(f"\n  ┌{'─'*56}┐")
+            print(f"  │ 🔌 SERVICE BENCHMARKS                            │")
+            print(f"  └{'─'*56}┘\n")
+            print(f"{textwrap.indent(service_data, '  ')}")
+        if resource_data:
+            print(f"\n  ┌{'─'*56}┐")
+            print(f"  │ 🖥️  RESOURCE MONITOR                              │")
+            print(f"  └{'─'*56}┘\n")
+            print(f"{textwrap.indent(resource_data, '  ')}")
+        print(f"\n{'='*60}")
+        print(f"  ⏱ {total_elapsed:.0f}s")
+        print(f"{'='*60}\n")
+        
+        if save_path:
+            report = f"# ZES Benchmark ({start.strftime('%Y-%m-%d %H:%M')})\n\n"
+            report += f"## Provider Benchmarks\n{bench_data}\n\n" if bench_data else ""
+            report += f"## Service Benchmarks\n{service_data}\n\n" if service_data else ""
+            report += f"## Resource Monitor\n{resource_data}\n" if resource_data else ""
+            Path(save_path).write_text(report)
+            print(f"  📄 Report saved: {save_path}\n")
+        return
+    
+    # Phase 1: 3 AI agents
+    print(f"\n  🚀 Launching 3 benchmark analysis agents...\n")
+    
+    agent_start = datetime.now()
+    tasks = {}
+    
+    if bench_data:
+        tasks["provider_bench"] = call_provider("provider_bench",
+            f"{PROVIDER_BENCH_PROMPT.format(bench_data=bench_data[:4000])}")
+    if service_data:
+        tasks["service_bench"] = call_provider("service_bench",
+            f"{SERVICE_BENCH_PROMPT.format(service_data=service_data[:4000])}")
+    if resource_data:
+        tasks["resource_monitor"] = call_provider("resource_monitor",
+            f"{RESOURCE_PROMPT.format(resource_data=resource_data[:4000])}")
+    
+    if not tasks:
+        print(f"  ⚠️  No data to analyze")
+        return
+    
+    results = await asyncio.gather(*[tasks[k] for k in tasks])
+    agent_elapsed = (datetime.now() - agent_start).total_seconds()
+    
+    result_map = dict(zip(tasks.keys(), results))
+    
+    total_time = (datetime.now() - start).total_seconds()
+    
+    # ─── Output ────────────────────────────────────────────────
+    print(f"\n{'='*60}")
+    print(f"  📋 BENCHMARK REPORT ({total_time:.0f}s)")
+    print(f"{'='*60}\n")
+    
+    if "provider_bench" in result_map:
+        print(f"  ┌{'─'*56}┐")
+        print(f"  │ ⚡ PROVIDER BENCHMARKS                              │")
+        print(f"  └{'─'*56}┘")
+        print(f"\n{textwrap.indent(bench_data[:500], '  ')}")
+        print(f"\n  AI Analysis:")
+        print(f"\n{textwrap.indent(result_map['provider_bench'].strip(), '  ')}")
+        print(f"\n")
+    
+    if "service_bench" in result_map:
+        print(f"  ┌{'─'*56}┐")
+        print(f"  │ 🔌 SERVICE BENCHMARKS                               │")
+        print(f"  └{'─'*56}┘")
+        print(f"\n{textwrap.indent(service_data[:500], '  ')}")
+        print(f"\n  AI Analysis:")
+        print(f"\n{textwrap.indent(result_map['service_bench'].strip(), '  ')}")
+        print(f"\n")
+    
+    if "resource_monitor" in result_map:
+        print(f"  ┌{'─'*56}┐")
+        print(f"  │ 🖥️  RESOURCE MONITOR                                │")
+        print(f"  └{'─'*56}┘")
+        print(f"\n{textwrap.indent(resource_data[:500], '  ')}")
+        print(f"\n  AI Analysis:")
+        print(f"\n{textwrap.indent(result_map['resource_monitor'].strip(), '  ')}")
+        print(f"\n")
+    
+    print(f"{'='*60}")
+    print(f"  ⏱ Total: {total_time:.0f}s | Benchmarks: {total_elapsed:.0f}s | AI: {agent_elapsed:.0f}s")
+    print(f"{'='*60}\n")
+    
+    # Save report
+    if save_path:
+        report = f"# ZES Benchmark ({start.strftime('%Y-%m-%d %H:%M')})\n\n"
+        report += f"## Provider Benchmarks\n{bench_data}\n\n" if bench_data else ""
+        report += f"## Service Benchmarks\n{service_data}\n\n" if service_data else ""
+        report += f"## Resource Monitor\n{resource_data}\n\n" if resource_data else ""
+        report += f"## AI Analysis\n\n"
+        for name, result in result_map.items():
+            report += f"### {name}\n{result}\n\n"
+        Path(save_path).write_text(report)
+        print(f"  📄 Report saved: {save_path}")
+
+
+# ─── CLI ──────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="ZES 3-Agent Benchmark — Provider latency + Service response + Resource monitoring",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            Examples:
+              zes bench                         # Full benchmark suite
+              zes bench --quick                  # Local benchmarks only (no AI)
+              zes bench --providers              # Providers only
+              zes bench --services               # Services only
+              zes bench --resources              # Resources only
+              zes bench --save ~/report.md       # Save to file
+              zes bench --url http://localhost:4356  # Custom service URL
+        """),
+    )
+    parser.add_argument("--quick", "-q", action="store_true", help="Local benchmarks only, no AI analysis")
+    parser.add_argument("--providers", action="store_true", help="Provider benchmarks only")
+    parser.add_argument("--services", action="store_true", help="Service benchmarks only")
+    parser.add_argument("--resources", action="store_true", help="Resource monitoring only")
+    parser.add_argument("--save", help="Save report to file")
+    parser.add_argument("--url", help="Custom service URL")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show raw data")
+    
+    args = parser.parse_args()
+    
+    asyncio.run(run_benchmark(args.quick, args.providers, args.services, 
+                              args.resources, args.save, args.url, args.verbose))
+
+
+if __name__ == "__main__":
+    main()
