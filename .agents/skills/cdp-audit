@@ -1,0 +1,70 @@
+---
+name: cdp-audit
+description: "Debug browser issues via CDP, health-check web apps, diagnose console/network errors. Now integrates browser-use Agent for automated diagnostics."
+---
+
+# CDP Audit — Chrome DevTools Protocol Diagnostics
+
+## Overview
+
+Diagnose and fix browser/web-app issues using CDP commands. Connects to headless Chrome via WebSocket (`ws://127.0.0.1:9222`) and uses CDP methods for full debugging control.
+
+**ZES environment:** Headless Chromium on port 9222 (service: `chromium-cdp`). CDP Viewer UI at `:9223`.
+
+## Prerequisites
+
+- Chromium in headless mode with remote debugging on port 9222
+- Python `websockets` library
+- Or browser-use CLI (`browser-use`) for higher-level diagnostics
+
+## Quick Start: Verify CDP is Alive
+
+```bash
+curl -s http://127.0.0.1:9222/json/version | python3 -m json.tool
+```
+
+## CDP Viewer
+
+A visual tab manager is available at **http://127.0.0.1:9223/** showing all open tabs with links to DevTools.
+
+## Browser Diagnostics with browser-use
+
+### Console Error Check
+```bash
+browser-use <<'PY'
+new_tab("http://localhost:5050")
+import time; time.sleep(2)
+# Capture console logs from CDP
+result = run_cdp("Runtime.evaluate", {"expression": "console.log('CDP audit check')"})
+print("Page info:", page_info())
+PY
+```
+
+### Full Dashboard Audit
+```bash
+browser-use <<'PY'
+for name, url in [("Vite", "http://localhost:5050"), ("Next.js", "http://localhost:7070"), ("Control", "http://localhost:8083")]:
+    new_tab(url)
+    import time; time.sleep(2)
+    info = page_info()
+    print(f"{name}: {info.get('title','?')} — {info.get('status','?')}")
+PY
+```
+
+## CDP Direct Commands
+
+```python
+# Get all console messages from a page
+async with cdp_connect() as conn:
+    await conn.execute("Runtime.enable")
+    async for msg in conn.listen("Runtime.consoleAPICalled"):
+        print(msg)
+```
+
+## Integration
+
+This skill pairs with:
+- **browser-harness** — for higher-level browser automation
+- **browser-use** — for Agent-based diagnostics
+- **ZES-browser-agent** — for ZES-specific preset diagnostics
+- **ZES-quality-gate** — for CI/CD quality checks with browser testing
