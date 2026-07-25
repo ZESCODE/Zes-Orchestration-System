@@ -1,13 +1,10 @@
 ---
-category: Safety
-
 name: ZES-safety
 description: Safety checks — prevent destructive operations on production systems, verify rollback capability, and validate before autonomous actions.
 metadata:
   origin: ZES
   version: 1.0.0
 ---
-
 
 # ZES Safety
 
@@ -30,141 +27,74 @@ Prevents destructive operations across the ZES production ecosystem.
 - Use env vars or `~/.zes/.env`
 - Rotate keys after any suspected exposure
 
----
-### Merged from ZES-security-review
 
----
-name: zes-security-review
-description: Security review for ZES infrastructure — API keys, port exposure, secrets, Cloudflare tunnel, 9Router, MCP tools.
-metadata:
-  origin: ZES
-  adapted_from: ECC
-  version: 1.0
----
+## Android Device Safety Guards
 
-# ZES Security Review
+Since ZES runs on a mobile device, check device health before resource-intensive operations.
 
-Security audit for ZES system. Checks secrets management, network exposure, authentication, and dependency safety.
-
-## When to Activate
-
-- Weekly security audit
-- After adding new services or exposing ports
-- After changing 9Router provider configs
-- After modifying Cloudflare tunnel settings
-- When rotating API keys
-
-## Audit Checklist
-
-### 1. Secrets Detection
-- [ ] Check `~/.9router/` for restricted permissions
-- [ ] Verify `dashboard_v4.py` has no hardcoded keys
-- [ ] Check agent-server.js for embedded tokens
-- [ ] Review shell scripts for credential parameters
-- [ ] Run: `grep -rn "sk-[a-zA-Z0-9]\{20,\}" ~/Zes-System/ --include="*.py" --include="*.js" --include="*.sh"`
-
-### 2. Network Exposure
-- [ ] All services bind to 127.0.0.1 (not 0.0.0.0)
-- [ ] Cloudflare tunnel only exposes intended services
-- [ ] Tor SOCKS5 is properly restricted (9050 localhost only)
-- [ ] No unexpected ports in `ss -tlnp`
-
-### 3. Dependency Scan
+### Battery Check
 ```bash
-python3 ~/Zes-System/scripts/security-supply-chain-scan.py
-bash ~/Zes-System/scripts/security-scan.sh
+# Before long-running operations, verify sufficient charge
+battery=$(termux-battery-status)
+level=$(echo "$battery" | python3 -c "import sys,json; print(json.load(sys.stdin)['percentage'])")
+charging=$(echo "$battery" | python3 -c "import sys,json; print(json.load(sys.stdin)['plugged'])")
+
+if [ "$level" -lt 20 ] && [ "$charging" = "false" ]; then
+  echo "⚠️  Battery at ${level}% and not charging. Cancel or connect charger."
+  exit 1
+fi
 ```
 
-### 4. Remediation
-- Any found secrets: rotate immediately, check git history
-- Open ports: close or restrict with iptables
-- Outdated packages: update via pip/npm
-
-
----
-### Merged from ZES-security-triage
-
----
-name: zes-security-triage
-description: "Security triage for ZES System: API keys, credentials, port exposure, service vulnerabilities."
----
-
-# ZES Security Triage
-
-Use when reviewing ZES System security posture, auditing credential handling, or investigating potential vulnerabilities.
-
-## Credential Audit
-
-Check for these credential types across the ZES codebase:
-
-1. **API Keys**: 9Router tokens, OpenAI keys, provider API keys
-2. **Auth Secrets**: `.9router/auth/` files, OAuth tokens, session cookies
-3. **SSH Keys**: Private keys in accessible locations
-4. **Service Tokens**: MCP auth tokens, dashboard passwords
-
-## Service Exposure Audit
-
-ZES services should only bind to `127.0.0.1` unless explicitly designed for network access.
-
+### Thermal Check
 ```bash
-# Check what's listening on all interfaces
-ss -tlnp | grep -v '127.0.0.1\|::1\|0.0.0.0'
+# Check battery temperature before heavy CPU/GPU work
+temp=$(termux-battery-status | python3 -c "import sys,json; print(json.load(sys.stdin)['temperature'])")
+if [ "$(echo "$temp > 40.0" | bc)" -eq 1 ]; then
+  echo "🔥 Battery at ${temp}°C — too hot for intensive operations. Cool down first."
+  exit 1
+fi
 ```
 
-### Port Exposure Rules
-
-| Port | Service | Should Be | Notes |
-|------|---------|-----------|-------|
-| 20128 | 9Router | 127.0.0.1 | API key auth via CLI token |
-| 8000 | VS Code | 127.0.0.1 | No auth token by default |
-| 8001 | VS Code Mobile | 127.0.0.1 | Proxy - inherits target exposure |
-| 8083 | Dashboard | 127.0.0.1 | System control panel |
-| 5901 | MCP Server | 127.0.0.1 | Browser control API |
-| 9222 | Chrome CDP | 127.0.0.1 | Full browser access |
-| 9050 | Tor SOCKS | 127.0.0.1 | Anonymizing proxy |
-| 7173 | ttyd | 127.0.0.1 | Web terminal |
-
-## Vulnerability Patterns to Check
-
-### Code Injection
-- `eval()`, `exec()`, `Function()` calls with user input
-- Shell command construction with string concatenation
-- Dynamic `require()`/`import()` with user-controlled paths
-- Template injection in dashboard HTML
-
-### Path Traversal
-- Static file serving with unvalidated paths
-- File read operations with user-controlled paths
-- Symlink following in archive extraction
-
-### Auth / Secrets
-- Hardcoded credentials or tokens in source code
-- Secrets in git history or commit messages
-- `.env` files committed to repo
-- API keys exposed in error messages or logs
-- OAuth tokens stored without encryption
-
-### Network
-- Services exposed to WAN without auth
-- Missing CORS restrictions on APIs
-- WebSocket endpoints without origin validation
-- Proxy forwarding without host validation
-
-## Quick Audit Commands
-
+### Storage Check
 ```bash
-# Scan for hardcoded secrets in staged changes
-git diff --cached | grep -iE 'api.?key|secret|token|password|sk-|ghp_'
-
-# Check for exposed ports
-ss -tlnp
-
-# Check file permissions on sensitive dirs
-ls -la ~/.9router/
-ls -la ~/.ssh/
-ls -la ~/.codex/
-
-# Check for world-readable secrets
-find ~/.9router -perm /o+r -type f 2>/dev/null
-find ~/.ssh -perm /o+r -type f 2>/dev/null
+# Verify sufficient free space before downloads or builds
+avail=$(df -h ~ | tail -1 | awk '{print $4}' | sed 's/G//')
+if [ "$(echo "$avail < 1.0" | bc)" -eq 1 ]; then
+  echo "💾 Only ${avail}GB free — need >1GB. Clean up before proceeding."
+  exit 1
+fi
 ```
+
+### Network Check (for downloads/API calls)
+```bash
+# Check WiFi connectivity before large downloads
+wifi=$(termux-wifi-connectioninfo 2>/dev/null)
+if [ -z "$wifi" ] || [ "$(echo "$wifi" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('supplicant_state','')=='COMPLETED')")" = "False" ]; then
+  echo "📡 Not connected to WiFi. Large downloads may use mobile data."
+  echo "   Set ZES_ALLOW_MOBILE_DATA=1 to proceed anyway."
+  [ "${ZES_ALLOW_MOBILE_DATA:-0}" != "1" ] && exit 1
+fi
+```
+
+### Combined Pre-Flight Check
+```bash
+# Full device health check before any heavy operation
+termux-battery-status > /dev/null || { echo "❌ Battery service unavailable"; exit 1; }
+battery=$(termux-battery-status)
+level=$(echo "$battery" | python3 -c "import sys,json; print(json.load(sys.stdin)['percentage'])")
+temp=$(echo "$battery" | python3 -c "import sys,json; print(json.load(sys.stdin)['temperature'])")
+charging=$(echo "$battery" | python3 -c "import sys,json; print(json.load(sys.stdin)['plugged'])")
+
+echo "🔋 ${level}% | 🌡️  ${temp}°C | 🔌 $( [ '$charging' = 'true' ] && echo 'Charging' || echo 'Battery' )"
+storage=$(df -h ~ | tail -1 | awk '{print $4}')
+echo "💾 Free: ${storage}"
+
+[ "$level" -lt 15 ] && [ "$charging" = "false" ] && echo "❌ Battery critical" && exit 1
+[ "$(echo "$temp > 42.0" | bc)" -eq 1 ] && echo "❌ Overheating" && exit 1
+echo "✅ Device health OK"
+```
+
+## Pair With
+- `shared_skills/android` — Full Android device access reference (camera, sensors, clipboard, intents)
+- `ZES-service-orchestrator` — Device-aware service scheduling
+- `ZES-benchmark` — Device performance metrics before/after operations
