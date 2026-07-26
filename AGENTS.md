@@ -1,3 +1,21 @@
+<!--
+╔══════════════════════════════════════════════════════════════╗
+║             WELCOME TO ZES ORCHESTRATION SYSTEM              ║
+║                                                              ║
+║  👋 New agent? Start here:                                   ║
+║                                                              ║
+║  1. Read this file → `cat ~/Zes-System/AGENTS.md`            ║
+║  2. Read your soul → `cat ~/Zes-System/docs/agents/*-soul.md`║
+║  3. Check memory   → `sqlite3 ~/.zes/memory_hub.sqlite`      ║
+║  4. See the trinity → `cat ~/Zes-System/docs/agents/trinity` ║
+║  5. Full onboarding → `cat ~/Zes-System/WELCOME.md`          ║
+║                                                              ║
+║  Key ref: AGENTS.md = unified rules for ALL agents            ║
+║           docs/agents/*-soul.md = YOUR identity               ║
+║           docs/configs/ = sample configs for each agent       ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+-->
 # ZES Orchestration System — Unified Agent Instructions
 
 **Version:** 3.8.0  
