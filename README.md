@@ -1,53 +1,84 @@
-# ZES System — Unified Personal AI
+# ZES Orchestration System — Unified Personal AI
 
-ZES orchestrates three AI agents (Codex CLI, Claude Code, Hermes) plus supporting services (9Router AI Gateway, amux Control Plane, ZES Dashboard) on Termux Android.
+**Version:** 3.8.0  
+**Repo:** https://github.com/ZESCODE/Zes-Orchestration-System  
+**Dashboard:** https://zes-dashboard.vercel.app  
 
-## Quick Start
+ZES orchestrates **three AI agents** (Codex CLI, Claude Code, Hermes) plus supporting services on Termux Android — a unified personal AI ecosystem with shared memory, skills, and infrastructure.
 
-```bash
-# Clone
-git clone https://github.com/ZESCODE/Zes-System.git ~/Zes-System
-cd ~/Zes-System
-
-# Deploy services (copies runit scripts to /var/service)
-sudo ./scripts/deploy-services.sh
-
-# Health check
-curl http://127.0.0.1:5002/api/health
-```
+---
 
 ## Architecture
 
 ```
-Codex (coder) ──┐
-Claude (review) ─┤── 9Router (:20128) ──→ LLM providers
-Hermes (memory) ─┘
-       │
-       └── ZES Memory Hub (SQLite+FTS5)
-       └── ZES Dashboard (:5050)
-       └── amux Control Plane (:8822)
+┌──────────┐  ┌──────────┐  ┌──────────┐
+│  Codex   │  │  Hermes  │  │ Claude   │
+│  CLI     │  │  Agent   │  │  Code    │
+│ (coder)  │  │(orchestr)│  │ (review) │
+└────┬─────┘  └────┬─────┘  └────┬─────┘
+     │             │             │
+     └─────────┬───┴─────────────┘
+               ▼
+     ┌──────────────────┐
+     │  ZES Memory Hub   │
+     │  224 memories      │
+     │  FTS5+embeddings   │
+     └──────────────────┘
 ```
 
-## Docs
+| Agent | Role | Soul | Tools |
+|-------|------|------|-------|
+| **Codex CLI** | Primary coder — execution & engineering | `docs/agents/codex-soul.md` | 82+ skills, CDP, power agent MCP |
+| **Claude Code** | Reviewer & parallel worker | `docs/agents/claude-soul.md` | amux, review workflows, a11y |
+| **Hermes** | Memory curator & orchestrator | `docs/agents/hermes-soul.md` | memory hub, self-improvement |
 
-See [AGENTS.md](AGENTS.md) for full system documentation:
-- Agent roles & workflow
-- Service management
-- Memory architecture
-- Skills (81 across 14 categories)
-- Port & path reference
+See `docs/agents/trinity.md` for full interaction model.
 
-## Services
+---
 
-| Service | Port | Runit | 
-|---------|------|-------|
-| ZES Dashboard | `:5050` | `zes-dashboard` |
-| Flask API | `:5002` | `zes-flask-api` |
-| 9Router | `:20128` | `9router-proxy` |
-| amux | `:8822` | `amux` |
-| Hermes | `:9119` | `hermes-dashboard` |
-| Claude Proxy | `:5905` | `claude-proxy` |
+## Key Components
 
-## License
+| Component | Path/URL | Description |
+|-----------|----------|-------------|
+| **AGENTS.md** | `AGENTS.md` (this file) | Unified ZES agent instructions (v3.8.0) |
+| **Power Agent** | `power-agent/` | MCP server — 38 tools across 6 skills |
+| **Dashboard** | `zes-dashboard.vercel.app` | Frost Edition glassmorphic UI |
+| **Memory Hub** | `~/.zes/memory_hub.sqlite` | 224 shared memories |
+| **Skills** | `~/.codex/skills/` | 82+ shared skills |
+| **Config Samples** | `docs/configs/` | Codex/Claude/Hermes config templates |
+| **Agent Souls** | `docs/agents/` | Identity docs for each agent |
 
-MIT
+---
+
+## Quick Start
+
+```bash
+# Read the unified instructions
+cat AGENTS.md
+
+# Read agent souls
+cat docs/agents/codex-soul.md
+cat docs/agents/claude-soul.md
+cat docs/agents/hermes-soul.md
+
+# View trinity interaction model
+cat docs/agents/trinity.md
+
+# Check memory hub
+sqlite3 ~/.zes/memory_hub.sqlite "SELECT count(*) FROM memories;"
+
+# Test power agent
+cd power-agent && POWER_AGENT_PORT=3099 node server.js &
+curl http://localhost:3099/health
+```
+
+---
+
+## Related Repositories
+
+| Repo | URL |
+|------|-----|
+| **ZES Orchestration System** | https://github.com/ZESCODE/Zes-Orchestration-System |
+| **ZES Dashboard** | https://github.com/ZESCODE/Zes-Dashboard |
+| **Hermes Agent** | https://github.com/ZESCODE/hermes-agent |
+| **ZES Skills** | https://github.com/ZESCODE/ZES-Skills |
