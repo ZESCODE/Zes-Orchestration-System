@@ -1,17 +1,17 @@
 # ZES Orchestration System — Unified Agent Instructions
 
-**Version:** 3.7.0  
+**Version:** 3.8.0  
 **Scope:** This file governs all agents operating within the ZES Orchestration System environment. It supersedes individual AGENTS.md files where conflicts exist.
 
 ---
 
 ## 1. System Overview
 
-ZES Orchestration System is a unified personal AI system running on Termux (Android). It orchestrates three primary agents — **Codex CLI**, **Hermes Agent**, and **Claude Code** — plus supporting services (BitRouter AI Gateway, AI-Proxy, Tor/IP rotation, ZES Dashboard).
+ZES Orchestration System is a unified personal AI system running on Termux (Android). It orchestrates three primary agents — **Codex CLI**, **Hermes Agent**, and **Claude Code** — plus supporting services (BitRouter AI Gateway, AI-Proxy, ZES Power Agent, Vercel Dashboard).
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│                    ZES System v3.7                          │
+│                    ZES System v3.8                          │
 │                                                           │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐                │
 │  │  Codex   │  │  Hermes  │  │ Claude   │                │
@@ -22,136 +22,116 @@ ZES Orchestration System is a unified personal AI system running on Termux (Andr
 │       └─────────┬───┴─────────────┘                       │
 │                 ▼                                          │
 │       ┌──────────────────┐                                │
-│       │  ZES Memory Hub   │  (unified memory)              │
-│       │  ~/.zes/memory   │  100 consolidated facts         │
+│       │  ZES Memory Hub   │  224 memories                  │
+│       │  ~/.zes/memory   │  FTS5 + embeddings              │
 │       └──────────────────┘                                │
 │                                                           │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────────┐        │
-│  │BitRouter │  │ AI-Proxy │  │ ZES CLI Toolkit   │        │
-│  │ :4356    │  │ :20129   │  │ research|batch     │        │
-│  │GPT+Gemini│  │Groq+OR+  │  │ consolidate|debug  │        │
-│  │          │  │Mistral+NV│  │ quality            │        │
-│  │          │  │+GitHub   │  │ (8 cloud providers)│        │
-│  └──────────┘  └──────────┘  └──────────────────┘        │
-│                                                           │
-│  ┌──────────┐  ┌──────────┐                               │
-│  │   Tor    │  │iprotate  │  ← IP rotation layer           │
-│  │ :9050 ✓  │  │15min     │                               │
-│  └──────────┘  └──────────┘                               │
+│  ┌──────────┐  ┌──────────────┐  ┌──────────────────┐     │
+│  │BitRouter │  │  ZES Power   │  │ ZES CLI Toolkit   │     │
+│  │ :4356    │  │  Agent (MCP) │  │ research|batch     │     │
+│  │GPT+Gemini│  │  38 tools    │  │ consolidate|debug  │     │
+│  └──────────┘  │ 6 skills     │  └──────────────────┘     │
+│                └──────────────┘                            │
+│  ┌──────────────────────────────────────┐                  │
+│  │  zes-dashboard.vercel.app (Vercel)   │                  │
+│  │  Frost Edition glassmorphic theme    │                  │
+│  └──────────────────────────────────────┘                  │
 └───────────────────────────────────────────────────────────┘
 ```
 
 ### Architecture Principles
 
-1. **Codex is the primary coder** — Execution, planning, file editing, repo work
-2. **Claude Code is the secondary coder** — Code review, parallel tasks, multi-agent orchestration
-3. **Hermes is the memory hub & orchestrator** — All memories flow through ZESMemoryProvider
-4. **BitRouter + AI-Proxy is the AI gateway** — BitRouter (:4356) routes OpenAI + Gemini via zero-config; AI-Proxy (:20129) routes Groq, OpenRouter, Mistral, NVIDIA, GitHub Models via Python proxy
-5. **Tor + iprotate is the privacy/IP rotation layer** — Routes selected providers through Tor exit nodes, rotates IP every 15 minutes. Fixed and running.
-6. **ZES CLI Toolkit provides cloud AI capabilities** — `zes research` (parallel sub-agents), `zes batch` (round-robin processing), `zes consolidate` (memory hub maintenance)
-7. **Skills are shared** — 97+ skills across 15 categories, including new ZES-specific tools
-8. **Services communicate via HTTP/WebSocket** — REST APIs, file-based bridges
+1. **Codex is the primary coder** — Execution, planning, file editing, repo work, CDP diagnostics
+2. **Claude Code is the secondary coder** — Code review, parallel tasks, accessibility, user-facing UI
+3. **Hermes is the memory hub & orchestrator** — All memories flow through ZESMemoryProvider (224 entries)
+4. **BitRouter** routes OpenAI + Gemini. AI-Proxy routes Groq, OpenRouter, Mistral, NVIDIA.
+5. **ZES Power Agent** provides 38 MCP tools across 6 skills (CDP, FS, API, DB, SSH, System)
+6. **Vercel Dashboard** hosts the Frost Edition glassmorphic UI at `zes-dashboard.vercel.app`
+7. **Skills are shared** — 82+ skills across 14 categories at `~/.codex/skills/`
 
 ---
 
 ## 2. The Trinity
 
-| Agent | Role | Saying | Config | Entry |
-|-------|------|--------|--------|-------|
-| **Codex** | Primary coder — the sharp scalpel | *"Unverified code is broken code"* | `~/.codex/AGENTS.md` | `npx codexapp` |
-| **Claude Code** | Secondary coder — the face | *"Code it right, test it clean"* | `~/.claude/AGENTS.md` | `claude` via amux |
-| **Hermes** | Orchestrator — the steady hand | *"I build to create continuity"* | `~/.hermes/soul.md` | r·sv hermes-gateway |
+| Agent | Role | Saying | Config | Soul |
+|-------|------|--------|--------|------|
+| **Codex** | Primary coder — the sharp scalpel | *"Unverified code is broken code"* | `~/.codex/AGENTS.md` | `docs/agents/codex-soul.md` |
+| **Claude Code** | Secondary coder — the face & bridge | *"Code it right, test it clean"* | `~/.claude/AGENTS.md` | `docs/agents/claude-soul.md` |
+| **Hermes** | Orchestrator & memory curator | *"I build to create continuity"* | `~/.hermes/SOUL.md` | `docs/agents/hermes-soul.md` |
+
+See `docs/agents/trinity.md` for full interaction model and conflict resolution.
 
 ---
 
 ## 3. Component Roles
 
 ### Codex CLI
-- **AGENTS.md:** `~/.codex/AGENTS.md` (v1.1.0)
-- **WORKFLOW.md:** `~/.codex/WORKFLOW.md` — 4-Phase QC workflow (Clarify → Plan → Implement → QC → Report)
-- **Skills:** 88 skill dirs (81 effective) at `~/.codex/skills/`
-- **MCP:** ZES Memory Hub bridge, GitHub, Context7, Exa, Playwright, Sequential Thinking
-- **Memory:** MCP-backed via `~/.zes/memory_hub.sqlite`
-- **Entry:** `npx codexapp` (port `:5900`) or direct CLI
+- **AGENTS.md:** `~/.codex/AGENTS.md` (v1.2.0)
+- **WORKFLOW.md:** `~/.codex/WORKFLOW.md` (4-Phase QC)
+- **Skills:** 82+ at `~/.codex/skills/`
+- **Key tools:** CDP audit, Power Agent MCP, TDD, memory ops, frost design system
+- **Domain:** Files, repos, builds, tests, deployments, browser diagnostics
 
 ### Claude Code
-- **AGENTS.md:** `~/.claude/AGENTS.md` (v1.0.0)
-- **Runtime:** Node.js, routed through 9Router via `ANTHROPIC_BASE_URL=http://127.0.0.1:5905`
-- **Managed by:** amux for parallel sessions
-- **Memory:** Queries ZES Memory Hub via `zes-memory` CLI
-- **Settings:** `~/.claude/settings.json` — references AGENTS.md + memory context
+- **AGENTS.md:** `~/.claude/AGENTS.md`
+- **Role:** Secondary coder, reviewer, parallel worker
+- **Key tools:** amux for parallel sessions, review workflows, accessibility checks
+- **Domain:** Code review, UI polish, parallel tasks, user communication
 
 ### Hermes Agent
-- **Soul:** `~/.hermes/soul.md` (v1.0.0) — custom ZES identity
-- **Config:** `~/.hermes/config.yaml` — routes 100% through 9Router
-- **Version:** 0.18.2
-- **Dashboard:** `:9119`
-- **Memory provider:** holographic → `~/.zes/memory_hub.sqlite`
-- **Cron:** Memory sync every 30 min
+- **Config:** `~/.hermes/config.yaml`, `~/.hermes/SOUL.md`
+- **Memory Hub:** `~/.zes/memory_hub.sqlite` (224 memories, FTS5 + embeddings)
+- **Decision files:** `~/.zes/memories/*.md`
+- **Key tools:** ZES-memory-ops, ZES-memory-consolidator, nightly self-review
+- **Domain:** Memory curation, cross-session continuity, self-improvement
 
-### BitRouter AI Gateway
-- **Binary:** `~/.local/bin/bitrouter` (v1.0.0-alpha.27, aarch64 glibc)
-- **Wrapper:** `~/.local/bin/bitrouter.sh` (grun + SSL_CERT_FILE)
-- **Port:** `:4356` (OpenAI-compatible endpoint — auto-detect zero-config)
-- **Auto-detected providers:** OpenAI (GPT-5.5, o-series, etc.), Google Gemini (all models)
-- **Config:** Zero-config mode (no `bitrouter.yaml` needed)
-- **runsv:** `/data/data/com.termux/files/usr/var/service/bitrouter/run`
+### ZES Power Agent
+- **Server:** `~/Zes-System/power-agent/server.js`
+- **Managed by:** runsv (`zes-power-agent`)
+- **38 MCP tools across 6 skills:**
+  - `cdp` (13): navigate, screenshot, evaluate, console, network, a11y, DOM, click, viewport, performance trace
+  - `fs` (10): read, write, append, list, delete, mkdir, exists, stat, search, grep
+  - `api` (5): GET, POST, PUT, PATCH, DELETE
+  - `db` (4): query, execute, tables, describe (read-only)
+  - `ssh` (1): remote command execution
+  - `sys` (5): exec, spawn, env, which, pidof (command allowlist)
+- **Transports:** stdio (default) or SSE (`POWER_AGENT_PORT=3099`)
 
-### AI-Proxy
-- **Path:** `~/.local/bin/ai-proxy.py`
-- **Port:** `:20129` (OpenAI-compatible endpoint)
-- **Providers:** Groq, OpenRouter (342 models), Mistral, NVIDIA NIM (118 models), GitHub Models (GPT-4.1, GPT-4.1-mini)
-- **runsv:** `/data/data/com.termux/files/usr/var/service/ai-proxy/run`
-
-### Tor + IP Rotation
-- **Tor Ports:** `:9050` (SOCKS5), `:9051` (Control — NEWNYM)
-- **Status:** ✅ Fixed and running (removed `down` file)
-- **iprotate:** runsv service that rotates Tor exit IP every 15 minutes
-- **Rate-limit bypass:** Multiple accounts across providers + IP rotation through Tor exit nodes
-
-### ZES CLI Toolkit
-The `zes` command provides unified access to all ZES cloud AI capabilities:
-
-| Command | Tool | What It Does |
-|---------|------|-------------|
-| `zes research "topic"` | Parallel Research Engine | Spawns 3-6 sub-agents across 5+ providers, synthesizes report |
-| `zes batch tasks.txt` | Cloud Hyperswarm Batch | Round-robins 100+ tasks across all providers (~60/min) |
-| `zes consolidate` | Memory Consolidator | 3-agent parallel scan finds duplicates/contradictions in memory hub |
-
-- **Scripts:** `~/.local/bin/zes`, `~/.local/bin/zes-research`, `~/.local/bin/zes-batch`, `~/.local/bin/zes-consolidate`
-- **Skills:** `ZES-parallel-research`, `ZES-model-router`, `ZES-memory-consolidator`
+### ZES Dashboard (Vercel)
+- **URL:** `https://zes-dashboard.vercel.app`
+- **Source:** `ZESCODE/Zes-Dashboard` on GitHub
+- **Stack:** Next.js 16.2.11, Turbopack, pnpm
+- **Theme:** ZES Frost Edition — 4-color glassmorphic (blue/green/orange/red)
+- **Deployment:** Vercel Production (arfaxdevs-projects team)
 
 ---
 
-## 4. Unified Memory Architecture
-
-### Memory Stores
-
-| Store | Location | Type | Agent Access |
-|-------|----------|------|-------------|
-| ZES Memory Hub | `~/.zes/memory_hub.sqlite` | SQLite + FTS5 | All agents (primary) |
-| Codex MCP Memory | `~/.zes/memory_hub.sqlite` | via MCP bridge | Codex CLI |
-| Codex raw memories | `~/.codex/memories/raw_memories.md` | Markdown | Codex CLI |
-| Hermes native | `~/.hermes/MEMORY.md` | Markdown | Hermes |
-| amux transcripts | `~/.amux/transcripts/` | JSONL | amux sessions |
-| Claude Code projects | `~/.claude/projects/*/CLAUDE.md` | Markdown | Claude Code |
-
-### Sync Flow
+## 4. Memory Hub Architecture
 
 ```
-Codex CLI ──zes-memory-sync (daemon)──→ ZES Memory Hub ←── Hermes (holographic)
-    │                                            │
-    └── MCP bridge server ──────────────────────┘
-         (memory_write, memory_search, etc.)
+Codex (self-review) ──→ zes-self-review ──→ ZES Memory Hub ←── Hermes (holographic)
+Claude (decisions) ──→ decision .md files ──→ ZES Memory Hub ←── Nightly consolidation
+                                                    │
+                                              ┌─────┴─────┐
+                                              │ 224 memories │
+                                              │ (facts/      │
+                                              │  decisions/  │
+                                              │  patterns/   │
+                                              │  preferences/│
+                                              │  bugfixes/   │
+                                              │  sessions)   │
+                                              └─────────────┘
 ```
 
-### CLI Usage
-```bash
-zes-memory status       # Hub health & count
-zes-memory list 20      # Recent memories
-zes-memory search <q>   # FTS5 full-text search
-zes-memory write <txt>  # Write memory entry
-```
+### Memory Types
+| Type | Example |
+|------|---------|
+| `fact` | "Dashboard deployed on Vercel at zes-dashboard.vercel.app" |
+| `decision` | "Use JS runtime CSS injection to bypass Turbopack stripping" |
+| `pattern` | "Vercel deploy: git push → npx vercel deploy --prod" |
+| `preference` | "User prefers Frost 4-color glassmorphic design" |
+| `bugfix` | "Memory graph height too small — fixed with calc(100vh - 280px)" |
+| `session` | "Dashboard frost redesign + power agent build session" |
 
 ---
 
@@ -161,107 +141,133 @@ zes-memory write <txt>  # Write memory entry
 |---------|------|--------|------------|
 | BitRouter AI Gateway | `:4356` | ✅ | runsv (bitrouter) |
 | AI-Proxy (Groq/OR/Mistral/NV) | `:20129` | ✅ | runsv (ai-proxy) |
-| ZES Dashboard (Vite) | `:5050` | ✅ | runsv (zes-dashboard) |
+| ZES Dashboard (Vite, local) | `:5050` | ✅ | runsv (zes-dashboard) |
+| ZES Power Agent (MCP) | stdio/:3099 | ✅ | runsv (zes-power-agent) |
 | Flask API | `:5002` | ✅ | runsv (zes-flask-api) |
-| 9Router (legacy) | `:20128` | ⚠️ | runsv (9router-proxy) — deprecated |
 | amux Control Plane | `:8822` | ✅ | runsv (amux) |
 | Hermes Dashboard | `:9119` | ✅ | runsv (hermes-dashboard) |
 | Hermes Gateway | — | ✅ | runsv (hermes-gateway) |
 | Tor SOCKS5 | `:9050` | ✅ | runsv (tor) |
 | Tor Control | `:9051` | ✅ | runsv (tor) |
 | iprotate (Tor IP rotation) | — | ✅ | runsv (zes-ip-rotator) |
+| CDP Chrome Debug | `:9222` | ✅ | runsv (chromium-cdp) |
+| CDP Viewer | `:9223` | ✅ | runsv (cdp-viewer) |
 | Control Center | `:8083` | ✅ | legacy |
 | ZES Memory Sync | — | ✅ | runsv (zes-memory-sync) |
 | ttyd web terminal | `:7173` | ✅ | runsv |
 
-### Provider Chain
-```
-All agents ──→ OpenCode ──→ BitRouter (:4356) ──→ OpenAI / Google Gemini
-                  │
-                  └──→ AI-Proxy (:20129) ──→ Groq / OpenRouter / Mistral / NVIDIA
-Claude Code ──→ BitRouter (:4356) ──→ backed by API key (needs credit balance)
-Hermes ──→ BitRouter (:4356) ──→ openai/gpt-5.4-mini (default)
-```
+### Vercel (Cloud)
+| Service | URL | Status |
+|---------|-----|--------|
+| ZES Dashboard | `https://zes-dashboard.vercel.app` | ✅ Production |
 
 ---
 
 ## 6. Skills
 
-**81 skills across 14 categories** at `~/.codex/skills/`. Shared across all agents.
+**82+ skills across 14 categories** at `~/.codex/skills/`. Shared across all agents.
 
 | Category | Count | Skills |
 |----------|-------|--------|
-| ZES | 29 | agentic-core, brainstorming, dashboard, design, memory-ops, provider-manager, etc. |
-| Core Workflow | 8 | tdd-workflow, verification-loop, coding-standards, error-handling, ecc-integration, etc. |
-| Backend | 8 | backend-patterns, api-design, fastapi-patterns, postgres-patterns, python-patterns, etc. |
-| Integration | 6 | composio-cli, flightclaw, search-codex-chats, telegram-bridge, 9router, etc. |
-| Frontend | 6 | frontend-patterns, react-patterns, react-performance, vite-patterns, dashboard-builder, etc. |
-| Project Workflow | 5 | plan-orchestrate, delivery-gate, context-budget, cost-tracking, repo-scan |
-| Security | 4 | security-review, security-scan, gateguard, safety-guard |
-| Testing & QA | 4 | browser-qa, python-testing, e2e-testing, benchmark |
-| Research | 3 | deep-research, documentation-lookup, exa-search |
-| System | 2 | imagegen, system-orchestrator |
-| Agent | 2 | agentic-engineering, knowledge-ops |
-| Discovery | 2 | skill-scout, skill-stocktake |
-| Design | 1 | designmd |
-| Free AI | 1 | freellm |
+| **ZES** | 29+ | agentic-core, brainstorming, dashboard, design, memory-ops, provider-manager, frost-edition, mcp-power-agent, feature-workflow, etc. |
+| **Core Workflow** | 8 | tdd-workflow, verification-loop, coding-standards, error-handling, ecc-integration, etc. |
+| **Backend** | 8 | backend-patterns, api-design, fastapi-patterns, postgres-patterns, python-patterns, etc. |
+| **Integration** | 6 | composio-cli, flightclaw, search-codex-chats, telegram-bridge, 9router, etc. |
+| **Frontend** | 6 | frontend-patterns, react-patterns, react-performance, vite-patterns, dashboard-builder, etc. |
+| **Project Workflow** | 5 | plan-orchestrate, delivery-gate, context-budget, cost-tracking, repo-scan |
+| **Security** | 4 | security-review, security-scan, gateguard, safety-guard |
+| **Testing & QA** | 5 | browser-qa, python-testing, e2e-testing, benchmark, cdp-audit |
+| **Research** | 3 | deep-research, documentation-lookup, exa-search |
+| **System** | 2 | imagegen, system-orchestrator |
+| **Agent** | 2 | agentic-engineering, knowledge-ops |
+| **Discovery** | 2 | skill-scout, skill-stocktake |
+| **Design** | 2 | designmd, ZES-frost-edition |
+| **Free AI** | 1 | freellm |
 
 ---
 
-## 7. Service Management (runit)
+## 7. MCP Servers
+
+| Server | Purpose | Status |
+|--------|---------|--------|
+| GitHub | Repo management, PRs, issues | ✅ |
+| Context7 | Documentation lookup | ✅ |
+| Exa | Neural search | ✅ |
+| Memory | ZES Memory Hub integration | ✅ |
+| Playwright | Browser automation | ✅ |
+| CDP | Chrome DevTools Protocol (`ws://127.0.0.1:9222`) | ✅ |
+| Sequential Thinking | Structured reasoning | ✅ |
+| DesignMD | Design system | ✅ |
+| Notion | Knowledge base | ✅ |
+| ZES Power Agent | Unified MCP server (38 tools, 6 skills) | ✅ |
+
+---
+
+## 8. Service Management (runit)
 
 ```bash
-sv start/stop/restart/status zrouter-proxy     # 9Router (:20128)
-sv start/stop/restart/status zes-flask-api     # Flask API (:5002)
-sv start/stop/restart/status zes-dashboard     # Vite Dashboard (:5050)
-sv start/stop/restart/status amux              # amux Control Plane (:8822)
-sv start/stop/restart/status hermes-gateway    # Hermes gateway
-sv start/stop/restart/status hermes-dashboard  # Hermes WebUI (:9119)
-sv start/stop/restart/status zes-memory-sync   # Memory hub sync
+sv start/stop/restart/status <service>
+
+# Core services
+sv status bitrouter          # AI Gateway (:4356)
+sv status ai-proxy           # AI Proxy (:20129)
+sv status zes-dashboard      # Vite Dashboard (:5050)
+sv status zes-power-agent    # MCP Power Agent
+sv status amux               # amux Control Plane (:8822)
+sv status hermes-gateway     # Hermes gateway
+sv status hermes-dashboard   # Hermes WebUI (:9119)
+sv status zes-memory-sync    # Memory hub sync
+sv status chromium-cdp       # Headless Chrome (:9222)
+sv status cdp-viewer         # CDP Viewer (:9223)
 ```
 
-## 8. Common Commands
+---
+
+## 9. Common Commands
 
 ```bash
-# Health
+# System Health
 curl http://127.0.0.1:5002/api/health      # System health
-curl http://127.0.0.1:5002/api/system      # System info
 curl http://127.0.0.1:5002/api/services    # All services
-curl http://127.0.0.1:5002/api/skills      # All skills (81)
 
-# Memory
-zes-memory status
-zes-memory list 20
-zes-memory search <query>
+# Memory Hub
+sqlite3 ~/.zes/memory_hub.sqlite "SELECT count(*) FROM memories;"  # Total memories
+sqlite3 ~/.zes/memory_hub.sqlite "SELECT id, type, substr(content,1,60) FROM memories ORDER BY id DESC LIMIT 10;"
 
-# Agents
-npx codexapp            # Codex app-server (:5900)
-claude                  # Claude Code (via amux for parallel)
-sv restart hermes-gateway  # Restart Hermes
+# Power Agent (if SSE mode)
+curl http://127.0.0.1:3099/health          # Power Agent health
+
+# CDP Diagnostics
+curl -s http://127.0.0.1:9222/json/version | python3 -m json.tool  # CDP status
+curl -s http://127.0.0.1:9222/json         # Open browser targets
 
 # Dashboard
-http://127.0.0.1:5050   # ZES Dashboard (Vite)
-http://127.0.0.1:8822   # amux Control Plane
-http://127.0.0.1:9119   # Hermes Dashboard
-http://127.0.0.1:8083   # Control Center (legacy)
+open https://zes-dashboard.vercel.app      # Vercel production
+open http://127.0.0.1:5050                 # Local dev
+
+# Git Operations
+cd ~/zes-system-repo && git pull           # Update system docs
+cd ~/Zes-Dashboard && git pull             # Update dashboard
 ```
 
-## 9. Key Paths
+---
+
+## 10. Key Paths
 
 | Resource | Path |
 |----------|------|
-| ZES Dashboard Source | `~/zes-system-v2/` |
+| ZES System Repo | `~/zes-system-repo/` (GitHub: ZESCODE/Zes-Orchestration-System) |
+| ZES Dashboard Source | `~/tmp-zes-dash/` (GitHub: ZESCODE/Zes-Dashboard) |
+| Power Agent | `~/Zes-System/power-agent/` |
 | Codex Config | `~/.codex/config.toml` |
-| Codex AGENTS.md | `~/.codex/AGENTS.md` |
+| Codex AGENTS.md | `~/.codex/AGENTS.md` (v1.2.0) |
 | Codex WORKFLOW.md | `~/.codex/WORKFLOW.md` |
-| Codex Skills | `~/.codex/skills/` (81 skills) |
+| Codex Skills | `~/.codex/skills/` (82+ skills) |
 | Claude Code AGENTS.md | `~/.claude/AGENTS.md` |
-| Hermes Source | `~/hermes-agent-full/` |
 | Hermes Config | `~/.hermes/config.yaml` |
-| Hermes Soul | `~/.hermes/soul.md` |
-| ZES Memory Hub DB | `~/.zes/memory_hub.sqlite` |
-| ZES Memory CLI | `~/.local/bin/zes-memory` |
-| amux Source | `~/amux-fresh/` |
-| amux Config | `~/.amux/config.yaml` |
-| 9Router | `~/9router/` |
-| Credentials | `~/.secure-credentials/master.env` |
+| Hermes Soul | `~/.hermes/SOUL.md` |
+| ZES Memory Hub DB | `~/.zes/memory_hub.sqlite` (224 memories) |
+| ZES Memory Files | `~/.zes/memories/*.md` |
+| Services | `/data/data/com.termux/files/usr/var/service/` |
+| Vercel Config | `~/.local/share/com.vercel.cli/auth.json` |
+| GitHub Token | `~/.git-credentials` |

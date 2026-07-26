@@ -1,70 +1,65 @@
-// Database Skill — SQLite + PostgreSQL queries
-import { execSync } from "child_process";
+import fs from 'fs';
+import { execSync } from 'child_process';
 
 export class DatabaseSkill {
-  name = "db";
-  description = "Execute SQL queries against SQLite or PostgreSQL databases";
+  constructor(options = {}) {
+    this.name = 'db';
+    this.description = 'SQL database queries (read-only by default)';
+    this.readOnly = options.readOnly !== false;
+    this.dbPath = options.dbPath || '';
+  }
+
+  _getDb(dbPath) {
+    const resolved = dbPath || this.dbPath;
+    if (!fs.existsSync(resolved)) throw new Error(`Database not found: ${resolved}`);
+    return resolved;
+  }
+
+  _rejectWrite(sql) {
+    const upper = sql.trim().toUpperCase();
+    const writeOps = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE', 'REPLACE'];
+    if (writeOps.some(op => upper.startsWith(op)) && this.readOnly) {
+      throw new Error('Write operations disabled (read-only mode). Set readOnly=false to enable.');
+    }
+  }
 
   tools() {
     return [
-      {
-        name: "execute",
-        description: "Execute a SQL query (SELECT returns rows, others return rowcount)",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string", description: "Database URL: sqlite:///path/to/db or postgresql://user:pass@host/db" },
-            query: { type: "string", description: "SQL query to execute" }
-          },
-          required: ["url", "query"]
-        }
-      },
-      {
-        name: "list_tables",
-        description: "List all tables in the database",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string", description: "Database URL" }
-          },
-          required: ["url"]
-        }
-      }
+      { name: 'query', description: 'Execute SQL SELECT query', inputSchema: { type: 'object', properties: { sql: { type: 'string' }, dbPath: { type: 'string' } }, required: ['sql'] } },
+      { name: 'execute', description: 'Execute SQL statement (write requires readOnly=false)', inputSchema: { type: 'object', properties: { sql: { type: 'string' }, dbPath: { type: 'string' } }, required: ['sql'] } },
+      { name: 'tables', description: 'List all tables', inputSchema: { type: 'object', properties: { dbPath: { type: 'string' } }, required: ['dbPath'] } },
+      { name: 'describe', description: 'Describe table schema', inputSchema: { type: 'object', properties: { table: { type: 'string' }, dbPath: { type: 'string' } }, required: ['table', 'dbPath'] } },
     ];
   }
 
-  async execute(args) {
-    try {
-      const { url, query } = args;
-      if (url.startsWith("sqlite://")) {
-        const dbPath = url.replace("sqlite://", "");
-        const isSelect = query.trim().toUpperCase().startsWith("SELECT");
-        if (isSelect) {
-          const cmd = `sqlite3 -json "${dbPath}" "${query.replace(/"/g, '\\"')}"`;
-          const output = execSync(cmd, { timeout: 10000, encoding: "utf-8" });
-          return { success: true, data: { rows: JSON.parse(output || "[]") } };
-        } else {
-          const cmd = `sqlite3 "${dbPath}" "${query.replace(/"/g, '\\"')}"`;
-          execSync(cmd, { timeout: 10000 });
-          return { success: true, data: { executed: true } };
-        }
-      } else if (url.startsWith("postgresql://")) {
-        const isSelect = query.trim().toUpperCase().startsWith("SELECT");
-        const cmd = `psql "${url}" -c "${query.replace(/"/g, '\\"')}" ${isSelect ? "--json" : ""} -t 2>&1`;
-        const output = execSync(cmd, { timeout: 15000, encoding: "utf-8" });
-        return { success: true, data: { result: output } };
+  async execute(toolName, args) {
+    const dbPath = this._getDb(args.dbPath);
+    switch (toolName) {
+      case 'query':
+      case 'execute': {
+        this._rejectWrite(args.sql);
+        const escapedSql = args.sql.replace(/'/g, "'\\''");
+        const isSelect = args.sql.trim().toUpperCase().startsWith('SELECT');
+        try {
+          const output = execSync(`sqlite3 -${isSelect ? 'json' : 'text'} "${dbPath}" '${escapedSql}' 2>/dev/null`, { encoding: 'utf-8', timeout: 10000 });
+          if (isSelect && output.trim()) return { rows: JSON.parse(output), count: JSON.parse(output).length };
+          return { changes: output.trim() || 'OK' };
+        } catch (err) { return { error: err.message }; }
       }
-      return { success: false, error: "Unsupported database URL. Use sqlite:// or postgresql://" };
-    } catch (e) {
-      return { success: false, error: e.message };
+      case 'tables': {
+        const output = execSync(`sqlite3 "${dbPath}" ".tables" 2>/dev/null`, { encoding: 'utf-8', timeout: 5000 });
+        const tables = output.trim().split(/\s+/).filter(Boolean);
+        return { tables, count: tables.length };
+      }
+      case 'describe': {
+        const output = execSync(`sqlite3 "${dbPath}" "PRAGMA table_info('${args.table}')" 2>/dev/null`, { encoding: 'utf-8', timeout: 5000 });
+        const columns = output.trim().split('\n').filter(Boolean).map(line => {
+          const parts = line.split('|');
+          return { cid: parseInt(parts[0]), name: parts[1], type: parts[2], notnull: parts[3] === '1', dflt: parts[4], pk: parts[5] === '1' };
+        });
+        return { table: args.table, columns };
+      }
+      default: throw new Error(`Unknown DB tool: ${toolName}`);
     }
-  }
-
-  async list_tables(args) {
-    const { url } = args;
-    if (url.startsWith("sqlite://")) {
-      return this.execute({ url, query: "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name" });
-    }
-    return this.execute({ url, query: "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name" });
   }
 }

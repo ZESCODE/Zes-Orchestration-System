@@ -1,0 +1,18 @@
+{
+  "name": "Claude Code — ZES Configuration",
+  "description": "Recommended settings for Claude Code working in ZES",
+  "mcpServers": {
+    "zes-power-agent": {
+      "command": "node",
+      "args": ["/data/data/com.termux/files/home/Zes-System/power-agent/server.js"]
+    }
+  },
+  "skills": [
+    "ZES-receiving-code-review",
+    "ZES-requesting-code-review",
+    "ZES-integration",
+    "ZES-quality-gate",
+    "frontend-a11y",
+    "e2e-testing"
+  ]
+}

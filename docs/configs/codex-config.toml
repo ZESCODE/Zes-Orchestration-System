@@ -1,0 +1,28 @@
+# Codex CLI — Recommended ZES Configuration
+# Copy to ~/.codex/config.toml
+
+[mcpServers]
+  # ZES Memory Hub
+  [mcpServers.memory]
+    command = "python3"
+    args = ["-m", "zes_mcp_server"]
+  
+  # ZES Power Agent (stdio mode)
+  [mcpServers.zes-power-agent]
+    command = "node"
+    args = ["/data/data/com.termux/files/home/Zes-System/power-agent/server.js"]
+  
+  # CDP Browser Diagnostics
+  [mcpServers.cdp]
+    command = "python3"
+    args = ["-m", "browser_cdp"]
+  
+  # Notion Knowledge Base
+  [mcpServers.notion]
+    command = "python3"
+    args = ["-m", "notion_mcp"]
+
+  # GitHub
+  [mcpServers.github]
+    command = "node"
+    args = ["/data/data/com.termux/files/home/.codex/mcp/github/server.js"]

@@ -1,291 +1,228 @@
-// CDP Browser Skill — Chrome DevTools Protocol browser automation
-// Reuses cdp-helpers.js for WebSocket management
+import WebSocket from 'ws';
 
-import { withCdpSocket, listTargets, captureScreenshot, evaluateOnPage } from "../cdp-helpers.js";
-
-const CDP_HTTP = "http://localhost:9222/json";
+const CDP_WS_URL = 'ws://127.0.0.1:9222/devtools/browser';
 
 export class CDPSkill {
-  name = "cdp";
-  description = "Chrome browser automation via CDP";
+  constructor() {
+    this.name = 'cdp';
+    this.description = 'Chrome browser automation via CDP';
+    this._ws = null;
+    this._msgId = 0;
+    this._pending = new Map();
+    this._connected = false;
+  }
 
-  async _getWsUrl() {
-    const targets = await listTargets();
-    const tab = targets.find(t => t.type === "page") || targets[0];
-    if (!tab) throw new Error("No browser tab found on " + CDP_HTTP);
-    return tab.webSocketDebuggerUrl;
+  async _connect() {
+    if (this._connected && this._ws) return;
+    try {
+      const resp = await fetch('http://127.0.0.1:9222/json/version');
+      const data = await resp.json();
+      const targetUrl = data.webSocketDebuggerUrl || CDP_WS_URL;
+      this._ws = new WebSocket(targetUrl);
+    } catch {
+      this._ws = new WebSocket(CDP_WS_URL);
+    }
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('CDP connection timeout')), 10000);
+      this._ws.on('open', () => { this._connected = true; clearTimeout(timeout); resolve(); });
+      this._ws.on('message', (raw) => {
+        try {
+          const msg = JSON.parse(raw.toString());
+          if (msg.id && this._pending.has(msg.id)) {
+            const { resolve: res } = this._pending.get(msg.id);
+            this._pending.delete(msg.id);
+            res(msg);
+          }
+        } catch {}
+      });
+      this._ws.on('close', () => { this._connected = false; });
+      this._ws.on('error', (err) => { this._connected = false; clearTimeout(timeout); reject(err); });
+    });
+  }
+
+  async _send(method, params = {}) {
+    await this._connect();
+    const id = ++this._msgId;
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(`CDP command '${method}' timed out`)), 30000);
+      this._pending.set(id, { resolve, reject: (err) => { clearTimeout(timeout); reject(err); } });
+      this._ws.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  async _getTargets() {
+    try {
+      const resp = await fetch('http://127.0.0.1:9222/json');
+      return await resp.json();
+    } catch { return []; }
+  }
+
+  async _attachToPage(urlFilter) {
+    const targets = await this._getTargets();
+    const page = urlFilter
+      ? targets.find(t => t.type === 'page' && t.url.includes(urlFilter))
+      : targets.find(t => t.type === 'page');
+    if (!page) throw new Error('No page target found');
+    return page.id;
+  }
+
+  async _attachToTarget(targetId) {
+    const result = await this._send('Target.attachToTarget', { targetId, flatten: true });
+    return result.result.sessionId;
+  }
+
+  async _sendWithSession(sessionId, method, params = {}) {
+    await this._connect();
+    const id = ++this._msgId;
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(`CDP session command '${method}' timed out`)), 30000);
+      this._pending.set(id, { resolve, reject: (err) => { clearTimeout(timeout); reject(err); } });
+      this._ws.send(JSON.stringify({ id, method, params, sessionId }));
+    }).then(msg => {
+      if (msg.error) throw new Error(msg.error.message);
+      return msg.result;
+    });
   }
 
   tools() {
     return [
-      {
-        name: "navigate",
-        description: "Navigate Chrome to a URL and wait for page load",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string", description: "Full URL to navigate to" },
-            waitMs: { type: "number", description: "Milliseconds to wait after navigation", default: 3000 }
-          },
-          required: ["url"]
-        }
-      },
-      {
-        name: "screenshot",
-        description: "Capture screenshot of current page as base64 PNG",
-        inputSchema: {
-          type: "object",
-          properties: {
-            fullPage: { type: "boolean", description: "Capture full page (including scroll)", default: false },
-            quality: { type: "number", description: "JPEG quality 0-100 (PNG ignores)", minimum: 0, maximum: 100 }
-          }
-        }
-      },
-      {
-        name: "evaluate",
-        description: "Execute JavaScript in the page context and return the result",
-        inputSchema: {
-          type: "object",
-          properties: {
-            expression: { type: "string", description: "JavaScript expression to evaluate" }
-          },
-          required: ["expression"]
-        }
-      },
-      {
-        name: "extract",
-        description: "Extract text content from the page or a specific element",
-        inputSchema: {
-          type: "object",
-          properties: {
-            selector: { type: "string", description: "CSS selector (omit for full page text)" },
-            maxLength: { type: "number", description: "Maximum text length to return", default: 10000 }
-          }
-        }
-      },
-      {
-        name: "click",
-        description: "Click an element on the page by CSS selector",
-        inputSchema: {
-          type: "object",
-          properties: {
-            selector: { type: "string", description: "CSS selector for the element to click" }
-          },
-          required: ["selector"]
-        }
-      },
-      {
-        name: "type",
-        description: "Type text into an input field",
-        inputSchema: {
-          type: "object",
-          properties: {
-            selector: { type: "string", description: "CSS selector for the input element" },
-            text: { type: "string", description: "Text to type" }
-          },
-          required: ["selector", "text"]
-        }
-      },
-      {
-        name: "get_console_logs",
-        description: "Get recent console log entries from the page",
-        inputSchema: { type: "object", properties: {}, required: [] }
-      },
-      {
-        name: "get_performance",
-        description: "Get performance metrics (JS heap, script duration, layout count)",
-        inputSchema: { type: "object", properties: {}, required: [] }
-      },
-      {
-        name: "list_tabs",
-        description: "List all open Chrome tabs/ pages",
-        inputSchema: { type: "object", properties: {}, required: [] }
-      },
-      {
-        name: "get_accessibility",
-        description: "Get accessibility tree for the current page",
-        inputSchema: {
-          type: "object",
-          properties: {
-            depth: { type: "number", description: "Tree depth to traverse", default: 4 }
-          }
-        }
-      },
-      {
-        name: "clear_cache",
-        description: "Clear browser cache and cookies",
-        inputSchema: { type: "object", properties: {}, required: [] }
-      }
+      { name: 'navigate', description: 'Navigate Chrome to a URL and wait for load', inputSchema: { type: 'object', properties: { url: { type: 'string', description: 'URL to navigate to' } }, required: ['url'] } },
+      { name: 'screenshot', description: 'Capture screenshot of the current page', inputSchema: { type: 'object', properties: { format: { type: 'string', enum: ['png', 'jpeg'], default: 'png' }, fullPage: { type: 'boolean', default: false } } } },
+      { name: 'evaluate', description: 'Execute JavaScript in the page context', inputSchema: { type: 'object', properties: { expression: { type: 'string', description: 'JavaScript expression' } }, required: ['expression'] } },
+      { name: 'getConsoleLogs', description: 'Retrieve console log entries', inputSchema: { type: 'object', properties: {} } },
+      { name: 'getNetworkRequests', description: 'List network requests made by the page', inputSchema: { type: 'object', properties: {} } },
+      { name: 'getAccessibilityTree', description: 'Get full accessibility tree', inputSchema: { type: 'object', properties: {} } },
+      { name: 'getDOMSnapshot', description: 'Get full DOM snapshot as HTML', inputSchema: { type: 'object', properties: {} } },
+      { name: 'highlightElement', description: 'Highlight element by CSS selector', inputSchema: { type: 'object', properties: { selector: { type: 'string' } }, required: ['selector'] } },
+      { name: 'listTabs', description: 'List all open browser tabs', inputSchema: { type: 'object', properties: {} } },
+      { name: 'click', description: 'Click element by CSS selector', inputSchema: { type: 'object', properties: { selector: { type: 'string' } }, required: ['selector'] } },
+      { name: 'setViewport', description: 'Set viewport size', inputSchema: { type: 'object', properties: { width: { type: 'number', default: 1280 }, height: { type: 'number', default: 720 } }, required: ['width', 'height'] } },
+      { name: 'startPerformanceTrace', description: 'Start collecting performance metrics', inputSchema: { type: 'object', properties: {} } },
+      { name: 'stopPerformanceTrace', description: 'Stop and return performance metrics', inputSchema: { type: 'object', properties: {} } },
     ];
   }
 
-  async navigate(args) {
-    const wsUrl = await this._getWsUrl();
-    return withCdpSocket(wsUrl, async (send) => {
-      await send("Page.enable");
-      await send("Page.navigate", { url: args.url });
-      await new Promise(r => setTimeout(r, args.waitMs || 3000));
-      const state = await send("Runtime.evaluate", {
-        expression: "JSON.stringify({ title: document.title, url: location.href, readyState: document.readyState })",
-        returnByValue: true
-      });
-      const raw = state?.result?.result?.value;
-      const data = raw ? JSON.parse(raw) : {};
-      return { success: true, data };
-    });
-  }
-
-  async screenshot(args) {
-    const wsUrl = await this._getWsUrl();
-    const data = await captureScreenshot(wsUrl, {
-      format: "png",
-      fullPage: args?.fullPage || false,
-      quality: args?.quality
-    });
-    return { success: true, data, contentType: "image" };
-  }
-
-  async evaluate(args) {
-    const wsUrl = await this._getWsUrl();
-    return withCdpSocket(wsUrl, async (send) => {
-      const result = await send("Runtime.evaluate", {
-        expression: args.expression,
-        returnByValue: true
-      });
-      const value = result?.result?.result?.value;
-      if (result?.result?.exceptionDetails) {
-        const exc = result.result.exceptionDetails;
-        return { success: false, error: exc.text + ": " + (exc.exception?.description || ""), exception: exc };
+  async execute(toolName, args) {
+    switch (toolName) {
+      case 'navigate': {
+        const targetId = args.targetId || await this._attachToPage();
+        const sessionId = await this._attachToTarget(targetId);
+        await this._sendWithSession(sessionId, 'Page.enable');
+        const result = await this._sendWithSession(sessionId, 'Page.navigate', { url: args.url });
+        return { url: args.url, frameId: result.frameId };
       }
-      return { success: true, data: value };
-    });
-  }
-
-  async extract(args) {
-    const wsUrl = await this._getWsUrl();
-    const selector = args?.selector || "body";
-    const maxLen = args?.maxLength || 10000;
-    return withCdpSocket(wsUrl, async (send) => {
-      const expr = '(function(s) { var e = document.querySelector(s); var t = e ? (e.textContent || e.innerText) : document.body.innerText; return JSON.stringify({ text: (t || "").slice(0, ' + maxLen + ') }); })(' + JSON.stringify(selector) + ')';
-      const result = await send("Runtime.evaluate", { expression: expr, returnByValue: true });
-      if (result?.result?.exceptionDetails) {
-        const exc = result.result.exceptionDetails;
-        return { success: false, error: exc.text + ": " + (exc.exception?.description || ""), exception: exc };
-      }
-      const rawVal = result?.result?.result?.value;
-      if (!rawVal) return { success: true, data: { text: "" } };
-      try {
-        return { success: true, data: JSON.parse(rawVal) };
-      } catch {
-        return { success: true, data: { text: rawVal } };
-      }
-    });
-  }
-
-  async click(args) {
-    const wsUrl = await this._getWsUrl();
-    return withCdpSocket(wsUrl, async (send) => {
-      const expr = '(function(s) { var e = document.querySelector(s); if (!e) return JSON.stringify({ error: "not found" }); e.click(); return JSON.stringify({ clicked: true }); })(' + JSON.stringify(args.selector) + ')';
-      const result = await send("Runtime.evaluate", { expression: expr, returnByValue: true });
-      if (result?.result?.exceptionDetails) {
-        const exc = result.result.exceptionDetails;
-        return { success: false, error: exc.text + ": " + (exc.exception?.description || ""), exception: exc };
-      }
-      const rawVal = result?.result?.result?.value;
-      if (!rawVal) return { success: true, data: { clicked: true }, note: "no value returned" };
-      try {
-        return { success: true, data: JSON.parse(rawVal) };
-      } catch {
-        return { success: true, data: { clicked: true } };
-      }
-    });
-  }
-
-  async type(args) {
-    const wsUrl = await this._getWsUrl();
-    return withCdpSocket(wsUrl, async (send) => {
-      const expr = '(function(s, t) { var e = document.querySelector(s); if (!e) return JSON.stringify({ error: "not found" }); e.value = t; e.dispatchEvent(new Event("input", { bubbles: true })); return JSON.stringify({ typed: true }); })(' + JSON.stringify(args.selector) + ', ' + JSON.stringify(args.text) + ')';
-      const result = await send("Runtime.evaluate", { expression: expr, returnByValue: true });
-      if (result?.result?.exceptionDetails) {
-        const exc = result.result.exceptionDetails;
-        return { success: false, error: exc.text + ": " + (exc.exception?.description || ""), exception: exc };
-      }
-      const rawVal = result?.result?.result?.value;
-      if (!rawVal) return { success: true, data: { typed: true }, note: "no value returned" };
-      try {
-        return { success: true, data: JSON.parse(rawVal) };
-      } catch {
-        return { success: true, data: { typed: true } };
-      }
-    });
-  }
-
-  async get_console_logs(args) {
-    const wsUrl = await this._getWsUrl();
-    return withCdpSocket(wsUrl, async (send) => {
-      await send("Console.enable");
-      await send("Log.enable");
-      await new Promise(r => setTimeout(r, 300));
-      const result = await send("Runtime.evaluate", {
-        expression: "JSON.stringify(window.__CDP_CONSOLE_LOGS__ || [])",
-        returnByValue: true
-      });
-      const rawConsole = result?.result?.result?.value;
-      return { success: true, data: rawConsole ? JSON.parse(rawConsole) : [] };
-    });
-  }
-
-  async get_performance(args) {
-    const wsUrl = await this._getWsUrl();
-    return withCdpSocket(wsUrl, async (send) => {
-      const perf = await send("Performance.getMetrics");
-      const metrics = perf?.result?.metrics || [];
-      const map = {};
-      for (const m of metrics) map[m.name] = m.value;
-      return { success: true, data: map };
-    });
-  }
-
-  async list_tabs(args) {
-    const targets = await listTargets();
-    const tabs = targets.filter(t => t.type === "page").map(t => ({
-      id: (t.id || "").slice(0, 16),
-      title: t.title || "",
-      url: (t.url || "").slice(0, 120),
-      wsUrl: t.webSocketDebuggerUrl || ""
-    }));
-    return { success: true, data: tabs };
-  }
-
-  async get_accessibility(args) {
-    const wsUrl = await this._getWsUrl();
-    const depth = args?.depth || 4;
-    return withCdpSocket(wsUrl, async (send) => {
-      const result = await send("Accessibility.getFullAXTree", {
-        depth,
-        fetchRelatives: true
-      });
-      const nodes = result?.result?.nodes || [];
-      const tree = [];
-      for (const node of nodes) {
-        const nameAttr = node.attributes?.find(a => a.name === "name");
-        const roleAttr = node.attributes?.find(a => a.name === "role");
-        tree.push({
-          role: roleAttr?.value || "",
-          name: nameAttr?.value || "",
-          ignored: node.ignored || false
+      case 'screenshot': {
+        const targetId = args.targetId || await this._attachToPage();
+        const sessionId = await this._attachToTarget(targetId);
+        await this._sendWithSession(sessionId, 'Page.enable');
+        const result = await this._sendWithSession(sessionId, 'Page.captureScreenshot', {
+          format: args.format || 'png', quality: args.quality || 80, captureBeyondViewport: !!args.fullPage,
         });
+        return { data: result.data, format: args.format || 'png' };
       }
-      return { success: true, data: tree.filter(n => !n.ignored && n.role) };
-    });
-  }
-
-  async clear_cache(args) {
-    const wsUrl = await this._getWsUrl();
-    return withCdpSocket(wsUrl, async (send) => {
-      await send("Network.clearBrowserCache");
-      await send("Network.clearBrowserCookies");
-      return { success: true, data: { cacheCleared: true, cookiesCleared: true } };
-    });
+      case 'evaluate': {
+        const targetId = args.targetId || await this._attachToPage();
+        const sessionId = await this._attachToTarget(targetId);
+        const result = await this._sendWithSession(sessionId, 'Runtime.evaluate', {
+          expression: args.expression, returnByValue: true,
+        });
+        if (result.exceptionDetails) return { error: result.exceptionDetails.text };
+        return { result: result.result.value ?? result.result.description };
+      }
+      case 'getConsoleLogs': {
+        const targetId = args.targetId || await this._attachToPage();
+        const sessionId = await this._attachToTarget(targetId);
+        const logs = [];
+        const origHandler = this._ws.onmessage;
+        this._ws.onmessage = (raw) => {
+          try { const m = JSON.parse(raw.toString()); if (m.method === 'Runtime.consoleAPICalled') logs.push(m.params); } catch {}
+        };
+        await this._sendWithSession(sessionId, 'Runtime.enable');
+        await new Promise(r => setTimeout(r, 500));
+        this._ws.onmessage = origHandler;
+        return { logs };
+      }
+      case 'getNetworkRequests': {
+        const targetId = args.targetId || await this._attachToPage();
+        const sessionId = await this._attachToTarget(targetId);
+        const requests = [];
+        const origHandler = this._ws.onmessage;
+        this._ws.onmessage = (raw) => {
+          try { const m = JSON.parse(raw.toString()); if (m.method === 'Network.requestWillBeSent') requests.push(m.params); } catch {}
+        };
+        await this._sendWithSession(sessionId, 'Network.enable');
+        await new Promise(r => setTimeout(r, 500));
+        this._ws.onmessage = origHandler;
+        return { requests };
+      }
+      case 'getAccessibilityTree': {
+        const targetId = args.targetId || await this._attachToPage();
+        const sessionId = await this._attachToTarget(targetId);
+        const result = await this._sendWithSession(sessionId, 'Accessibility.getFullAXTree');
+        return { nodes: result.nodes };
+      }
+      case 'getDOMSnapshot': {
+        const targetId = args.targetId || await this._attachToPage();
+        const sessionId = await this._attachToTarget(targetId);
+        await this._sendWithSession(sessionId, 'DOM.enable');
+        const root = await this._sendWithSession(sessionId, 'DOM.getDocument', { depth: -1 });
+        return { html: root.root.outerHTML };
+      }
+      case 'highlightElement': {
+        const targetId = args.targetId || await this._attachToPage();
+        const sessionId = await this._attachToTarget(targetId);
+        await this._sendWithSession(sessionId, 'DOM.enable');
+        const nodeId = 1;
+        await this._sendWithSession(sessionId, 'DOM.querySelector', { nodeId, selector: args.selector });
+        await this._sendWithSession(sessionId, 'Overlay.enable');
+        await this._sendWithSession(sessionId, 'Overlay.highlightNode', {
+          nodeId, highlightConfig: { borderColor: { r: 255, g: 0, b: 0, a: 1 } },
+        });
+        return { highlighted: true, selector: args.selector };
+      }
+      case 'listTabs': {
+        const targets = await this._getTargets();
+        return targets.map(t => ({ id: t.id, title: t.title, url: t.url, type: t.type }));
+      }
+      case 'click': {
+        const targetId = args.targetId || await this._attachToPage();
+        const sessionId = await this._attachToTarget(targetId);
+        await this._sendWithSession(sessionId, 'Runtime.evaluate', {
+          expression: `document.querySelector('${args.selector.replace(/'/g, "\\'")}')?.click()`,
+        });
+        return { clicked: true, selector: args.selector };
+      }
+      case 'setViewport': {
+        const targetId = args.targetId || await this._attachToPage();
+        const sessionId = await this._attachToTarget(targetId);
+        await this._sendWithSession(sessionId, 'Emulation.setDeviceMetricsOverride', {
+          width: args.width || 1280, height: args.height || 720,
+          deviceScaleFactor: args.deviceScaleFactor || 1, mobile: args.mobile || false,
+        });
+        return { viewport: { width: args.width, height: args.height } };
+      }
+      case 'startPerformanceTrace': {
+        const targetId = args.targetId || await this._attachToPage();
+        const sessionId = await this._attachToTarget(targetId);
+        await this._sendWithSession(sessionId, 'Tracing.start', {
+          categories: '-*,disabled-by-default-devtools.timeline,devtools.timeline',
+        });
+        return { tracing: true };
+      }
+      case 'stopPerformanceTrace': {
+        const targetId = args.targetId || await this._attachToPage();
+        const sessionId = await this._attachToTarget(targetId);
+        const events = [];
+        const origHandler = this._ws.onmessage;
+        this._ws.onmessage = (raw) => {
+          try { const m = JSON.parse(raw.toString()); if (m.method === 'Tracing.dataCollected') events.push(...m.params.value); } catch {}
+        };
+        await this._sendWithSession(sessionId, 'Tracing.end');
+        await new Promise(r => setTimeout(r, 1000));
+        this._ws.onmessage = origHandler;
+        return { events, count: events.length };
+      }
+      default: throw new Error(`Unknown CDP tool: ${toolName}`);
+    }
   }
 }

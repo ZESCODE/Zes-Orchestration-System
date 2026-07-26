@@ -1,0 +1,29 @@
+# Hermes — Recommended ZES Configuration
+# Copy relevant sections to ~/.hermes/config.yaml
+
+memory:
+  hub_path: ~/.zes/memory_hub.sqlite
+  auto_consolidate: true
+  consolidation_interval_hours: 24
+  max_memories_before_consolidation: 500
+
+agents:
+  codex:
+    type: codex-cli
+    config_path: ~/.codex/AGENTS.md
+    workflow_path: ~/.codex/WORKFLOW.md
+  
+  claude:
+    type: claude-code
+    config_path: ~/.claude/AGENTS.md
+  
+  power_agent:
+    server_path: ~/Zes-System/power-agent/server.js
+    transport: stdio
+    sse_port: 3099
+
+services:
+  - bitrouter:4356
+  - ai-proxy:20129
+  - zes-dashboard:5050
+  - chromium-cdp:9222

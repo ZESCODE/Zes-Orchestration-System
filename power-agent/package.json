@@ -1,15 +1,15 @@
 {
   "name": "zes-power-agent",
   "version": "1.0.0",
-  "description": "MCP Power Agent — Unified multi-skill server for ZES ecosystem",
-  "type": "module",
+  "description": "MCP Power Agent — unified skill server for ZES ecosystem",
   "main": "server.js",
+  "type": "module",
   "scripts": {
     "start": "node server.js",
     "test": "node test.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "ws": "^8.21.1"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ws": "^8.0.0"
   }
 }

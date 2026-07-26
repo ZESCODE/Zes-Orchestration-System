@@ -1,98 +1,43 @@
-// REST API Skill — HTTP client for external APIs
-// Supports GET, POST, PUT, PATCH, DELETE with JSON body
-
 export class RESTAPISkill {
-  name = "api";
-  description = "Make HTTP requests to external APIs";
+  constructor(options = {}) {
+    this.name = 'api';
+    this.description = 'HTTP client for REST API calls';
+    this.baseUrl = options.baseUrl || '';
+  }
+
+  _isExternal(url) {
+    try {
+      const u = new URL(url);
+      return !['localhost', '127.0.0.1', '0.0.0.0', '[::1]', ''].includes(u.hostname) && !u.hostname.endsWith('.local');
+    } catch { return false; }
+  }
 
   tools() {
     return [
-      {
-        name: "get",
-        description: "Perform an HTTP GET request",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string", description: "Full URL to send GET request to" },
-            headers: { type: "object", description: "Optional HTTP headers as key-value pairs" }
-          },
-          required: ["url"]
-        }
-      },
-      {
-        name: "post",
-        description: "Perform an HTTP POST request with JSON body",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string", description: "Full URL to send POST request to" },
-            body: { type: "object", description: "JSON body to send" },
-            headers: { type: "object", description: "Optional HTTP headers" }
-          },
-          required: ["url"]
-        }
-      },
-      {
-        name: "put",
-        description: "Perform an HTTP PUT request with JSON body",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string" },
-            body: { type: "object" },
-            headers: { type: "object" }
-          },
-          required: ["url"]
-        }
-      },
-      {
-        name: "delete",
-        description: "Perform an HTTP DELETE request",
-        inputSchema: {
-          type: "object",
-          properties: {
-            url: { type: "string" },
-            headers: { type: "object" }
-          },
-          required: ["url"]
-        }
-      }
+      { name: 'get', description: 'HTTP GET request', inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
+      { name: 'post', description: 'HTTP POST with JSON body', inputSchema: { type: 'object', properties: { url: { type: 'string' }, body: { type: 'object' } }, required: ['url', 'body'] } },
+      { name: 'put', description: 'HTTP PUT request', inputSchema: { type: 'object', properties: { url: { type: 'string' }, body: { type: 'object' } }, required: ['url', 'body'] } },
+      { name: 'patch', description: 'HTTP PATCH request', inputSchema: { type: 'object', properties: { url: { type: 'string' }, body: { type: 'object' } }, required: ['url', 'body'] } },
+      { name: 'delete', description: 'HTTP DELETE request', inputSchema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } },
     ];
   }
 
-  async _fetch(method, args) {
-    const options = {
-      method,
-      headers: { "Content-Type": "application/json", ...(args.headers || {}) }
-    };
-    if (args.body && method !== "GET" && method !== "DELETE") {
-      options.body = JSON.stringify(args.body);
-    }
+  async execute(toolName, args) {
+    const url = args.url.startsWith('http') ? args.url : `${this.baseUrl}${args.url}`;
+    if (this._isExternal(url)) console.warn(`[API] External request to: ${url}`);
+    const method = toolName.toUpperCase();
+    const headers = { 'Content-Type': 'application/json', ...(args.headers || {}) };
+    const body = ['POST', 'PUT', 'PATCH'].includes(method) && args.body ? JSON.stringify(args.body) : undefined;
     try {
-      const response = await fetch(args.url, options);
-      const contentType = response.headers.get("content-type") || "";
-      let data;
-      if (contentType.includes("application/json")) {
-        data = await response.json();
-      } else {
-        data = await response.text();
-      }
-      return {
-        success: true,
-        data: {
-          status: response.status,
-          statusText: response.statusText,
-          body: data,
-          headers: Object.fromEntries(response.headers.entries())
-        }
-      };
-    } catch (error) {
-      return { success: false, error: error.message };
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), args.timeout || 30000);
+      const response = await fetch(url, { method, headers, body, signal: controller.signal });
+      clearTimeout(timeout);
+      const contentType = response.headers.get('content-type') || '';
+      const data = contentType.includes('application/json') ? await response.json() : await response.text();
+      return { status: response.status, statusText: response.statusText, headers: Object.fromEntries(response.headers.entries()), data };
+    } catch (err) {
+      return { error: err.message, url, method };
     }
   }
-
-  async get(args) { return this._fetch("GET", args); }
-  async post(args) { return this._fetch("POST", args); }
-  async put(args) { return this._fetch("PUT", args); }
-  async delete(args) { return this._fetch("DELETE", args); }
 }

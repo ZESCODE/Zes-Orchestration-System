@@ -1,194 +1,101 @@
-// Filesystem Skill — Read, write, list, manage files
-import fs from "fs";
-import fsp from "fs/promises";
-import path from "path";
+import fs from 'fs';
+import path from 'path';
+import { execSync } from 'child_process';
 
-const ALLOWED_ROOTS = [
-  process.env.HOME || "/data/data/com.termux/files/home",
-  "/data/data/com.termux/files/home/Zes-",
-  "/data/data/com.termux/files/home/.zes",
-  "/data/data/com.termux/files/home/.codex"
-];
-
-function isPathSafe(targetPath) {
-  const resolved = path.resolve(targetPath);
-  return ALLOWED_ROOTS.some(root => resolved.startsWith(root));
-}
+const ALLOWED_PREFIXES = [process.env.HOME || '/data/data/com.termux/files/home', '/tmp', '/data/data/com.termux/files/usr/tmp'];
 
 export class FileSystemSkill {
-  name = "fs";
-  description = "Read, write, and manage files in the filesystem";
+  constructor() {
+    this.name = 'fs';
+    this.description = 'Filesystem operations — read, write, search, list files';
+  }
+
+  _ensureSafe(targetPath) {
+    const resolved = path.resolve(targetPath);
+    if (!ALLOWED_PREFIXES.some(p => resolved.startsWith(p)) && !resolved.startsWith('/data/data/com.termux')) {
+      throw new Error(`Access denied: '${targetPath}' is outside allowed directories`);
+    }
+    return resolved;
+  }
 
   tools() {
     return [
-      {
-        name: "read",
-        description: "Read file contents as text (UTF-8)",
-        inputSchema: {
-          type: "object",
-          properties: {
-            path: { type: "string", description: "Absolute path to the file" }
-          },
-          required: ["path"]
-        }
-      },
-      {
-        name: "write",
-        description: "Write text content to a file (creates directories if needed)",
-        inputSchema: {
-          type: "object",
-          properties: {
-            path: { type: "string", description: "Absolute path to write to" },
-            content: { type: "string", description: "Text content to write" }
-          },
-          required: ["path", "content"]
-        }
-      },
-      {
-        name: "list",
-        description: "List directory contents with file names, sizes, and modification times",
-        inputSchema: {
-          type: "object",
-          properties: {
-            dir: { type: "string", description: "Absolute directory path" },
-            pattern: { type: "string", description: "Glob pattern to filter (e.g. *.tsx)" }
-          },
-          required: ["dir"]
-        }
-      },
-      {
-        name: "delete",
-        description: "Delete a file or empty directory",
-        inputSchema: {
-          type: "object",
-          properties: {
-            path: { type: "string", description: "Path to delete" }
-          },
-          required: ["path"]
-        }
-      },
-      {
-        name: "exists",
-        description: "Check if a file or directory exists",
-        inputSchema: {
-          type: "object",
-          properties: {
-            path: { type: "string", description: "Path to check" }
-          },
-          required: ["path"]
-        }
-      },
-      {
-        name: "search",
-        description: "Search for files matching a glob pattern",
-        inputSchema: {
-          type: "object",
-          properties: {
-            pattern: { type: "string", description: "Glob pattern (e.g. **/*.tsx)" },
-            root: { type: "string", description: "Root directory to search from" }
-          },
-          required: ["pattern"]
-        }
-      },
-      {
-        name: "mkdir",
-        description: "Create a directory (including parent directories)",
-        inputSchema: {
-          type: "object",
-          properties: {
-            path: { type: "string", description: "Absolute path for the new directory" }
-          },
-          required: ["path"]
-        }
-      }
+      { name: 'read', description: 'Read file contents', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
+      { name: 'write', description: 'Write content to a file', inputSchema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } },
+      { name: 'append', description: 'Append content to a file', inputSchema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } },
+      { name: 'list', description: 'List directory contents', inputSchema: { type: 'object', properties: { path: { type: 'string' }, recursive: { type: 'boolean', default: false } }, required: ['path'] } },
+      { name: 'delete', description: 'Delete a file', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
+      { name: 'mkdir', description: 'Create directory (recursive)', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
+      { name: 'exists', description: 'Check if file/directory exists', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
+      { name: 'stat', description: 'Get file/directory stats', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
+      { name: 'search', description: 'Search files by name pattern', inputSchema: { type: 'object', properties: { root: { type: 'string' }, pattern: { type: 'string' }, maxDepth: { type: 'number', default: 5 } }, required: ['root', 'pattern'] } },
+      { name: 'grep', description: 'Search file contents for pattern', inputSchema: { type: 'object', properties: { pattern: { type: 'string' }, path: { type: 'string' }, maxResults: { type: 'number', default: 20 } }, required: ['pattern', 'path'] } },
     ];
   }
 
-  async read(args) {
-    if (!isPathSafe(args.path)) throw new Error("Access denied: path not in allowed roots");
-    const content = await fsp.readFile(args.path, "utf-8");
-    return { success: true, data: { content, size: content.length } };
-  }
-
-  async write(args) {
-    if (!isPathSafe(args.path)) throw new Error("Access denied: path not in allowed roots");
-    await fsp.mkdir(path.dirname(args.path), { recursive: true });
-    await fsp.writeFile(args.path, args.content, "utf-8");
-    return { success: true, data: { written: args.content.length, path: args.path } };
-  }
-
-  async list(args) {
-    if (!isPathSafe(args.dir)) throw new Error("Access denied: path not in allowed roots");
-    const entries = await fsp.readdir(args.dir, { withFileTypes: true });
-    const items = [];
-    for (const entry of entries) {
-      if (args.pattern) {
-        const match = entry.name.endsWith(args.pattern.replace("*", ""));
-        if (!match) continue;
+  async execute(toolName, args) {
+    switch (toolName) {
+      case 'read': {
+        const p = this._ensureSafe(args.path);
+        return { content: fs.readFileSync(p, 'utf-8'), path: args.path };
       }
-      try {
-        const stat = await fsp.stat(path.join(args.dir, entry.name));
-        items.push({
-          name: entry.name,
-          isDir: entry.isDirectory(),
-          size: stat.size,
-          modified: stat.mtime.toISOString()
-        });
-      } catch {}
-    }
-    return { success: true, data: items };
-  }
-
-  async delete(args) {
-    if (!isPathSafe(args.path)) throw new Error("Access denied: path not in allowed roots");
-    await fsp.rm(args.path, { recursive: true, force: true });
-    return { success: true, data: { deleted: args.path } };
-  }
-
-  async exists(args) {
-    try {
-      await fsp.access(args.path);
-      const stat = await fsp.stat(args.path);
-      return { success: true, data: { exists: true, isDir: stat.isDirectory(), isFile: stat.isFile() } };
-    } catch {
-      return { success: true, data: { exists: false } };
-    }
-  }
-
-  async search(args) {
-    if (args.root && !isPathSafe(args.root)) throw new Error("Access denied: path not in allowed roots");
-    // Use a simple recursive search instead of glob
-    const root = args.root || process.env.HOME;
-    const pattern = args.pattern;
-    const results = [];
-    
-    async function walk(dir) {
-      if (results.length >= 200) return;
-      try {
-        const entries = await fsp.readdir(dir, { withFileTypes: true });
-        for (const entry of entries) {
-          if (results.length >= 200) return;
-          const fullPath = path.join(dir, entry.name);
-          if (entry.isDirectory() && !entry.name.startsWith(".") && !entry.name.startsWith("node_modules")) {
-            await walk(fullPath);
-          } else if (entry.isFile()) {
-            // Simple glob matching
-            const regex = new RegExp("^" + pattern.replace(/\*/g, ".*").replace(/\?/g, ".") + "$");
-            if (regex.test(entry.name)) {
-              results.push(fullPath);
-            }
-          }
+      case 'write': {
+        const p = this._ensureSafe(args.path);
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        fs.writeFileSync(p, args.content, 'utf-8');
+        return { written: true, path: args.path, size: Buffer.byteLength(args.content, 'utf-8') };
+      }
+      case 'append': {
+        const p = this._ensureSafe(args.path);
+        fs.appendFileSync(p, args.content);
+        return { appended: true, path: args.path };
+      }
+      case 'list': {
+        const p = this._ensureSafe(args.path);
+        if (args.recursive) {
+          const result = []; const walk = (dir) => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const f = path.join(dir, e.name); result.push(path.relative(p, f)); if (e.isDirectory()) walk(f); } };
+          walk(p); return { entries: result, count: result.length };
         }
-      } catch {}
+        return { entries: fs.readdirSync(p, { withFileTypes: true }).map(e => ({ name: e.name, type: e.isDirectory() ? 'directory' : 'file' })) };
+      }
+      case 'delete': {
+        const p = this._ensureSafe(args.path);
+        fs.rmSync(p, { recursive: true, force: true });
+        return { deleted: true, path: args.path };
+      }
+      case 'mkdir': {
+        const p = this._ensureSafe(args.path);
+        fs.mkdirSync(p, { recursive: true });
+        return { created: true, path: args.path };
+      }
+      case 'exists': {
+        const p = this._ensureSafe(args.path);
+        return { exists: fs.existsSync(p), path: args.path };
+      }
+      case 'stat': {
+        const p = this._ensureSafe(args.path);
+        const s = fs.statSync(p);
+        return { path: args.path, size: s.size, isDirectory: s.isDirectory(), isFile: s.isFile(), modified: s.mtime };
+      }
+      case 'search': {
+        const root = this._ensureSafe(args.root);
+        try {
+          const output = execSync(`find "${root}" -maxdepth ${args.maxDepth || 5} -name "${args.pattern}" -type f 2>/dev/null | head -100`, { encoding: 'utf-8', timeout: 10000 });
+          const files = output.trim().split('\n').filter(Boolean);
+          return { files, count: files.length };
+        } catch { return { files: [], count: 0 }; }
+      }
+      case 'grep': {
+        const p = this._ensureSafe(args.path);
+        try {
+          const isDir = fs.statSync(p).isDirectory();
+          const target = isDir ? `-r "${p}"` : `"${p}"`;
+          const output = execSync(`rg -n --max-count ${args.maxResults || 20} "${args.pattern.replace(/"/g, '\\"')}" ${target} 2>/dev/null | head -${args.maxResults || 20}`, { encoding: 'utf-8', timeout: 15000 });
+          const lines = output.trim().split('\n').filter(Boolean);
+          return { results: lines, count: lines.length };
+        } catch { return { results: [], count: 0 }; }
+      }
+      default: throw new Error(`Unknown FS tool: ${toolName}`);
     }
-    
-    await walk(root);
-    return { success: true, data: results };
-  }
-
-  async mkdir(args) {
-    if (!isPathSafe(args.path)) throw new Error("Access denied: path not in allowed roots");
-    await fsp.mkdir(args.path, { recursive: true });
-    return { success: true, data: { created: args.path } };
   }
 }
