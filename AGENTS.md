@@ -157,8 +157,26 @@ Claude (decisions) ──→ decision .md files ──→ ZES Memory Hub ←─�
 
 | Service | Port | Status | Managed By |
 |---------|------|--------|------------|
-| BitRouter AI Gateway | `:4356` | ✅ | runsv (bitrouter) |
-| AI-Proxy (Groq/OR/Mistral/NV) | `:20129` | ✅ | runsv (ai-proxy) |
+| **claude-oc Proxy** | `:5905` | ✅ | runsv (claude-proxy) |
+| **Tor SOCKS5** | `:9050` | ✅ | runsv (tor) |
+| **Sub-Agent Pipeline** | CLI | ✅ | `zes-subagent` tool |
+| **BitRouter AI Gateway** | `:4356` | ❌ Deprecated | Use claude-oc instead |
+| **ZES Power Agent** | `:3099` | ✅ | runsv (zes-power-agent) |
+| **amux Sessions** | `:8822` | ✅ | amux |
+| **ZES Dashboard** | Vercel | ✅ | zes-dashboard.vercel.app |
+
+### Provider Evolution
+
+```
+v1 (deprecated):   Claude Code → 9Router :20128 → Groq/OpenRouter → Various models
+v2 (current):      Claude Code → claude-oc :5905 → 1VPN/Tor → OpenCode Free
+```
+
+**Key differences:**
+- claude-oc is a Python single-file proxy (~600 lines), replaces 9Router
+- Multi-transport: 1VPN (fast, 1-7s), Tor (private, 3-35s), Direct (testing)
+- Agent-aware model routing: each of 5 agents gets a different backend model
+- Threaded server handles concurrent requests from parallel sub-agents
 | ZES Dashboard (Vite, local) | `:5050` | ✅ | runsv (zes-dashboard) |
 | ZES Power Agent (MCP) | stdio/:3099 | ✅ | runsv (zes-power-agent) |
 | Flask API | `:5002` | ✅ | runsv (zes-flask-api) |

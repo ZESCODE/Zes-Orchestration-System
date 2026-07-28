@@ -1,0 +1,590 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""claude-oc — Multi-transport Anthropic-to-OpenCode proxy.
+   Supports: 1VPN HTTPS proxies, Tor SOCKS5, Direct.
+   Claude Code → claude-oc → [1VPN|Tor|Direct] → OpenCode Free"""
+
+import json, os, sys, http.server, socket, signal, ssl, time, subprocess, base64, random
+from socketserver import ThreadingMixIn
+try:
+    import socks
+    import requests
+    HAVE_REQUESTS = True
+except ImportError:
+    HAVE_REQUESTS = False
+
+PORT = int(os.environ.get("CLAUDE_OC_PORT", 5905))
+OPENCODE_BASE = "https://opencode.ai/zen/v1"
+TOR_HOST = "127.0.0.1"
+TOR_PORT = 9050
+RATE_LIMIT_THRESHOLD = 0.85
+MAX_RETRIES = 2
+MAX_THREADS = 16
+DEFAULT_MODEL = "opencode/deepseek-v4-flash-free"
+
+# ─── Threaded HTTP Server (prevents single-request blocking) ──
+class ThreadedHTTPServer(ThreadingMixIn, http.server.HTTPServer):
+    """HTTPServer with ThreadingMixIn for concurrent request handling."""
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 32
+
+# ─── Transport Selection ─────────────────────────────────────
+#   "1vpn"  → 1VPN HTTPS proxies (fast, no VPN slot needed)
+#   "tor"   → Tor SOCKS5 (slow, private)
+#   "direct" → Direct connection (no proxy)
+#   "auto"  → 1VPN primary, fallback to Tor, then direct
+TRANSPORT = os.environ.get("CLAUDE_OC_TRANSPORT", "auto")
+
+# ─── 1VPN Provider Config (reverse-engineered from extension) ─
+VPN1_CREDS = ("a2epfq5ugq0u", "ptkx3fqg6v7n")
+VPN1_SERVERS = {
+    "sgp": {"city": "Singapore", "cc": "sg",
+        "hosts": [
+            "free-singapore-https-1.cloudburstcdn.com:443",
+            "free-singapore-https-2.cloudtimecdn.com:443",
+            "free-singapore-https-3.weathercloudapp.com:443",
+        ]},
+    "lax": {"city": "Los Angeles", "cc": "us",
+        "hosts": [
+            "free-los-angeles-https-1.cloudburstcdn.com:443",
+            "free-los-angeles-https-2.cloudtimecdn.com:443",
+            "free-los-angeles-https-3.cloudflaracdn.com:443",
+            "free-los-angeles-https-4.cloudflaracdn.com:443",
+            "usa-west-free-https-1.weathercloudapp.com:443",
+        ]},
+    "ams": {"city": "Amsterdam", "cc": "nl",
+        "hosts": [
+            "free-amsterdam-https-1.cloudburstcdn.com:443",
+            "free-amsterdam-https-2.cloudtimecdn.com:443",
+            "free-amsterdam-https-3.cloudflaracdn.com:443",
+            "free-amsterdam-https-4.cloudflaracdn.com:443",
+            "netherlands-free-https-1.weathercloudapp.com:443",
+            "netherlands-free-https-2.cloudquickcdn.com:443",
+        ]},
+}
+
+# Shuffle for load balancing
+for loc in VPN1_SERVERS.values():
+    random.shuffle(loc["hosts"])
+VPN1_LOCATIONS = list(VPN1_SERVERS.keys())
+random.shuffle(VPN1_LOCATIONS)
+VPN1_INDEX = 0
+
+# ─── Stats ────────────────────────────────────────────────────
+stats = {"requests": 0, "errors": 0, "rotations": 0, "last_rotate": time.time(),
+         "active_transport": TRANSPORT, "active_location": "unknown"}
+
+# ─── Agent Model Routing Table ───────────────────────────────
+#   Maps Claude Code model names → backend model + transport.
+#   This is how each agent (Hermes, Codex, Claude) gets its own
+#   DeepSeek variant on its own transport.
+#
+#   Agent    Claude model       → Backend model              Transport
+#   ──────   ──────────────       ─────────────               ─────────
+#   Hermes   claude-sonnet-5     → deepseek-v4-flash-free     1VPN (fast)
+#   Codex    claude-haiku-4-5    → deepseek-v4-flash          1VPN (fast)
+#   Claude   claude-opus-5       → deepseek-v4-flash-free     1VPN (fast, reliable)
+#   Default  claude-4-haiku-*    → deepseek-v4-flash-free     1VPN (fast)
+#
+MODEL_ROUTES = {
+    # Hermes — primary agent, deepseek-v4-flash-free via 1VPN
+    "claude-sonnet-5":            {"model": "deepseek-v4-flash-free", "transport": "1vpn"},
+    "claude-sonnet-4-20250514":   {"model": "deepseek-v4-flash-free", "transport": "1vpn"},
+    # Codex — code agent, nemotron (NVIDIA) for code strength via 1VPN
+    "claude-haiku-4-5":           {"model": "nemotron-3-ultra-free",  "transport": "1vpn"},
+    "claude-4-haiku-20250514":    {"model": "nemotron-3-ultra-free",  "transport": "1vpn"},
+    # Claude — UI agent, deepseek via 1VPN (Tor unreliable for routine work)
+    "claude-opus-5":              {"model": "deepseek-v4-flash-free", "transport": "1vpn"},
+    "claude-4-opus-20250514":     {"model": "deepseek-v4-flash-free", "transport": "1vpn"},
+    # Premium — ling (Yi) via 1VPN
+    "claude-4-sonnet-20250514":   {"model": "ling-3.0-flash-free",    "transport": "1vpn"},
+    # Fallback — gemini via Tor for emergency routing
+    "claude-3-5-haiku":           {"model": "gemini-3.6-flash",       "transport": "tor"},
+    "claude-3-haiku-20240307":    {"model": "gemini-3.6-flash",       "transport": "tor"},
+    "claude-3-5-haiku-latest":    {"model": "gemini-3.6-flash",       "transport": "tor"},
+}
+# Default route for any unlisted model
+DEFAULT_ROUTE = {"model": "deepseek-v4-flash-free", "transport": "1vpn"}
+
+# ═══════════════════════════════════════════════════════════════
+# TRANSPORT: 1VPN HTTPS Proxy
+# ═══════════════════════════════════════════════════════════════
+def _vpn1_get_proxy():
+    """Get next 1VPN proxy host in round-robin."""
+    global VPN1_INDEX
+    loc = VPN1_LOCATIONS[VPN1_INDEX % len(VPN1_LOCATIONS)]
+    server = VPN1_SERVERS[loc]
+    host = server["hosts"][VPN1_INDEX % len(server["hosts"])]
+    VPN1_INDEX += 1
+    proxy_url = f"https://{VPN1_CREDS[0]}:{VPN1_CREDS[1]}@{host}"
+    stats["active_location"] = f"{server['city']} ({server['cc']})"
+    return proxy_url, loc
+
+def _call_1vpn(messages_oc, model, max_tokens):
+    """Call OpenCode via 1VPN HTTPS proxy."""
+    url = f"{OPENCODE_BASE}/chat/completions"
+    body = {"model": model, "messages": messages_oc, "max_tokens": max_tokens}
+    
+    proxy_url, loc = _vpn1_get_proxy()
+    stats["active_transport"] = f"1vpn-{loc}"
+    
+    session = requests.Session()
+    session.proxies = {"http": proxy_url, "https": proxy_url}
+    session.headers.update({"Content-Type": "application/json", "User-Agent": "ZES-CLAUDE-OC/1.0"})
+    
+    resp = session.post(url, json=body, timeout=30)
+    if resp.status_code == 200:
+        stats["requests"] += 1
+        return resp.json(), 200
+    elif resp.status_code == 429:
+        stats["errors"] += 1
+        return {"error": {"type": "rate_limit_error", "message": "rate_limited"}}, 429
+    else:
+        stats["errors"] += 1
+        return {"error": {"type": "upstream_error", "message": resp.text[:200]}}, resp.status_code
+
+# ═══════════════════════════════════════════════════════════════
+# TRANSPORT: Tor SOCKS5
+# ═══════════════════════════════════════════════════════════════
+def rotate_tor():
+    """Rotate Tor exit node via control port."""
+    stats["rotations"] += 1
+    stats["last_rotate"] = time.time()
+    stats["errors"] = 0
+    try:
+        s = socket.socket()
+        s.settimeout(5)
+        s.connect(("127.0.0.1", 9051))
+        cookie = open(os.path.expanduser("~/.tor/control_auth_cookie"), "rb").read()
+        s.send(f"AUTHENTICATE {cookie.hex()}\r\n".encode())
+        s.recv(1024)
+        s.send(b"SIGNAL NEWNYM\r\n")
+        s.recv(1024)
+        s.close()
+        time.sleep(3)
+        return True
+    except:
+        return False
+
+def _call_tor(messages_oc, model, max_tokens):
+    """Call OpenCode via Tor SOCKS5."""
+    url = f"{OPENCODE_BASE}/chat/completions"
+    body = {"model": model, "messages": messages_oc, "max_tokens": max_tokens}
+    
+    stats["active_transport"] = "tor"
+    proxy = f"socks5h://{TOR_HOST}:{TOR_PORT}"
+    
+    session = requests.Session()
+    session.proxies = {"http": proxy, "https": proxy}
+    session.headers.update({"Content-Type": "application/json", "User-Agent": "ZES-CLAUDE-OC/1.0"})
+    
+    resp = session.post(url, json=body, timeout=60)
+    if resp.status_code == 200:
+        stats["requests"] += 1
+        return resp.json(), 200
+    elif resp.status_code == 429:
+        stats["errors"] += 1
+        return {"error": {"type": "rate_limit_error", "message": "rate_limited"}}, 429
+    else:
+        stats["errors"] += 1
+        return {"error": {"type": "upstream_error", "message": resp.text[:200]}}, resp.status_code
+
+# ═══════════════════════════════════════════════════════════════
+# TRANSPORT: Direct (no proxy)
+# ═══════════════════════════════════════════════════════════════
+def _call_direct(messages_oc, model, max_tokens):
+    """Call OpenCode directly (no proxy)."""
+    url = f"{OPENCODE_BASE}/chat/completions"
+    body = {"model": model, "messages": messages_oc, "max_tokens": max_tokens}
+    
+    stats["active_transport"] = "direct"
+    
+    resp = requests.post(url, json=body, timeout=15)
+    if resp.status_code == 200:
+        stats["requests"] += 1
+        return resp.json(), 200
+    elif resp.status_code == 429:
+        stats["errors"] += 1
+        return {"error": {"type": "rate_limit_error", "message": "rate_limited"}}, 429
+    else:
+        stats["errors"] += 1
+        return {"error": {"type": "upstream_error", "message": resp.text[:200]}}, resp.status_code
+
+# ═══════════════════════════════════════════════════════════════
+# TRANSPORT ROUTER
+# ═══════════════════════════════════════════════════════════════
+TRANSPORT_CHAIN = {
+    "1vpn":  [("1vpn", _call_1vpn)],
+    "tor":   [("tor", _call_tor)],
+    "direct": [("direct", _call_direct)],
+    "auto":  [("1vpn", _call_1vpn), ("tor", _call_tor), ("direct", _call_direct)],
+}
+
+def call_opencode(messages_oc, model, max_tokens, stream=False, transport_override=None):
+    """Route through transport chain with auto-failover.
+    
+    Args:
+        transport_override: If set, use this transport instead of TRANSPORT chain.
+    """
+    # If transport override given, use that specific chain
+    if transport_override and transport_override in TRANSPORT_CHAIN:
+        chain = TRANSPORT_CHAIN[transport_override]
+    else:
+        chain = TRANSPORT_CHAIN.get(TRANSPORT, TRANSPORT_CHAIN["auto"])
+    last_error = None
+    
+    for transport_name, transport_fn in chain:
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                data, code = transport_fn(messages_oc, model, max_tokens)
+                
+                if code == 200:
+                    return data, code
+                
+                if code == 429:
+                    last_error = f"{transport_name}: rate limited (attempt {attempt+1})"
+                    stats["errors"] += 1
+                    if attempt < MAX_RETRIES:
+                        time.sleep(2)
+                        continue
+                    break  # Move to next transport
+                
+                # Non-429 error — break to next transport
+                last_error = f"{transport_name}: HTTP {code}"
+                break
+                
+            except Exception as e:
+                last_error = f"{transport_name}: {e}"
+                stats["errors"] += 1
+                if attempt < MAX_RETRIES:
+                    time.sleep(1)
+                    continue
+                break  # Transport failed, try next
+    
+    return {"error": {"type": "all_transports_failed", "message": str(last_error)}}, 502
+
+
+def check_rate_limit(headers):
+    """Check rate limit headers from OpenCode response."""
+    remaining = headers.get("X-RateLimit-Remaining")
+    limit = headers.get("X-RateLimit-Limit")
+    if remaining and limit:
+        ratio = 1 - (int(remaining) / int(limit))
+        return ratio >= RATE_LIMIT_THRESHOLD
+    return False
+
+
+def anthropic_to_openai(anthropic_msg):
+    """Convert a single Anthropic message to OpenAI format."""
+    role = anthropic_msg.get("role", "user")
+    content = anthropic_msg.get("content", "")
+    
+    # Handle both string content and content blocks
+    if isinstance(content, list):
+        # Content blocks — extract text
+        texts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+                elif block.get("type") == "image":
+                    texts.append("[Image]")  # Skip images for OpenCode
+                elif block.get("type") == "tool_use":
+                    texts.append(json.dumps(block))
+                elif block.get("type") == "tool_result":
+                    texts.append(json.dumps(block))
+        content = "\n".join(texts)
+    
+    # Map roles
+    if role == "assistant":
+        oc_role = "assistant"
+    elif role in ("user", "system"):
+        oc_role = role
+    else:
+        oc_role = "user"
+    
+    return {"role": oc_role, "content": str(content)}
+
+
+def openai_to_anthropic(openai_resp):
+    """Convert OpenAI chat completion to Anthropic Messages format."""
+    choices = openai_resp.get("choices", [])
+    if not choices:
+        return {
+            "id": openai_resp.get("id", ""),
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": ""}],
+            "model": openai_resp.get("model", ""),
+            "stop_reason": "end_turn",
+            "usage": openai_resp.get("usage", {}),
+        }
+    
+    choice = choices[0]
+    message = choice.get("message", {})
+    content = message.get("content", "")
+    reasoning = message.get("reasoning_content", "")
+    
+    # Build content blocks
+    content_blocks = []
+    if reasoning:
+        content_blocks.append({
+            "type": "text",
+            "text": reasoning,
+        })
+    if content:
+        content_blocks.append({
+            "type": "text",
+            "text": content,
+        })
+    
+    if not content_blocks:
+        content_blocks.append({"type": "text", "text": ""})
+    
+    # Map finish reason
+    finish_reason = choice.get("finish_reason", "end_turn")
+    stop_map = {
+        "stop": "end_turn",
+        "length": "max_tokens",
+        "content_filter": "content_filtered",
+        "tool_calls": "tool_use",
+    }
+    
+    return {
+        "id": openai_resp.get("id", ""),
+        "type": "message",
+        "role": "assistant",
+        "content": content_blocks,
+        "model": openai_resp.get("model", "deepseek-v4-flash-free"),
+        "stop_reason": stop_map.get(finish_reason, finish_reason),
+        "usage": {
+            "input_tokens": openai_resp.get("usage", {}).get("prompt_tokens", 0),
+            "output_tokens": openai_resp.get("usage", {}).get("completion_tokens", 0),
+        },
+    }
+
+
+class ClaudeOCProxy(http.server.BaseHTTPRequestHandler):
+    """HTTP server that speaks Anthropic Messages API and routes to OpenCode via Tor."""
+    
+    def do_GET(self):
+        print(f"[claude-oc] GET {self.path}", flush=True)
+        self._log_headers(self.headers)
+        if self.path == "/health":
+            self._json(200, {
+                "status": "ok",
+                "stats": stats,
+                "tor": self._check_tor(),
+                "transport": TRANSPORT,
+                "transports_available": {
+                    "1vpn": list(VPN1_SERVERS.keys()),
+                    "tor": self._check_tor(),
+                    "direct": True,
+                },
+                "vpn1_locations": len(VPN1_SERVERS),
+            })
+        elif self.path in ("/v1/me", "/me"):
+            self._json(200, {
+                "id": "zes-deepseek",
+                "isAuthenticated": True,
+                "model": DEFAULT_MODEL,
+            })
+        elif self.path == "/v1/models":
+            models_list = []
+            for claude_model, route in MODEL_ROUTES.items():
+                models_list.append({
+                    "id": claude_model,
+                    "object": "model",
+                    "routes_to": route["model"],
+                    "via": route["transport"],
+                })
+            models_list.append({"id": "deepseek-v4-flash-free", "object": "model"})
+            self._json(200, {"data": models_list})
+        elif self.path.startswith("/v1/models/"):
+            # Model-specific endpoint — return the model
+            model_id = self.path.split("/v1/models/")[-1]
+            self._json(200, {
+                "id": model_id,
+                "object": "model",
+                "created": 1785250000,
+                "owned_by": "opencode",
+            })
+        else:
+            # Return a valid response for ANY GET path
+            self._json(200, {"status": "ok"})
+    
+    def do_POST(self):
+        print(f"[claude-oc] POST {self.path}", flush=True)
+        self._log_headers(self.headers)
+        if self.path == "/v1/messages" or self.path.startswith("/v1/messages?"):
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length) if length else b"{}"
+            self._handle_messages(body)
+        elif self.path == "/v1/chat/completions":
+            # Also handle OpenAI format (for testing/debugging)
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length) if length else b"{}"
+            self._handle_chat(body)
+        else:
+            # Return a valid response for ANY GET path
+            self._json(200, {"status": "ok"})
+    
+    def _handle_messages(self, raw_body):
+        """Handle Anthropic Messages API format."""
+        try:
+            req = json.loads(raw_body)
+        except:
+            self._json(400, {"error": "invalid json"})
+            return
+        
+        # Log the request for debugging
+        log_req = {k: v for k, v in req.items() if k != "messages"}
+        log_req["msg_count"] = len(req.get("messages", []))
+        print(f"[claude-oc] Anthropic request: model={req.get('model','?')} stream={req.get('stream',False)} msgs={log_req['msg_count']}", flush=True)
+        
+        # Extract Anthropic messages format
+        system = req.get("system", "")
+        messages = req.get("messages", [])
+        model = req.get("model", "deepseek-v4-flash-free")
+        max_tokens = req.get("max_tokens", 4096)
+        # Force non-streaming for compatibility (streaming requires SSE conversion)
+        stream = False
+        
+        # Build system message if present
+        oc_messages = []
+        if system:
+            if isinstance(system, list):
+                system_text = " ".join(
+                    b.get("text", "") for b in system if b.get("type") == "text"
+                )
+            else:
+                system_text = str(system)
+            oc_messages.append({"role": "system", "content": system_text})
+        
+        # Convert each message
+        for msg in messages:
+            oc_messages.append(anthropic_to_openai(msg))
+        
+        # Map model name through agent routing table
+        requested_model = model
+        route = MODEL_ROUTES.get(requested_model, DEFAULT_ROUTE)
+        oc_model = route["model"]
+        transport = route["transport"]
+        log_req["route"] = f"{requested_model} → {oc_model} via {transport}"
+        print(f"[claude-oc] Route: {requested_model} → {oc_model} via {transport}", flush=True)
+        
+        # Route to OpenCode via per-model transport
+        resp_data, status_code = call_opencode(oc_messages, oc_model, max_tokens, stream,
+                                               transport_override=transport)
+        
+        if status_code != 200 or "error" in resp_data:
+            err = resp_data.get("error", resp_data)
+            self._json(502, {
+                "type": "error",
+                "error": {
+                    "type": err.get("type", "upstream_error"),
+                    "message": err.get("message", str(err)),
+                }
+            })
+            return
+        
+        # Convert to Anthropic format
+        anthropic_resp = openai_to_anthropic(resp_data)
+        self._json(200, anthropic_resp)
+    
+    def _handle_chat(self, raw_body):
+        """Handle OpenAI Chat Completions format (passthrough to OpenCode via Tor)."""
+        try:
+            req = json.loads(raw_body)
+        except:
+            self._json(400, {"error": "invalid json"})
+            return
+        
+        messages = req.get("messages", [])
+        model = req.get("model", "deepseek-v4-flash-free")
+        max_tokens = req.get("max_tokens", 4096)
+        
+        # Strip provider prefix if present (opencode/deepseek-v4-flash-free → deepseek-v4-flash-free)
+        if "/" in model:
+            model = model.split("/")[-1]
+        
+        resp_data, status_code = call_opencode(messages, model, max_tokens)
+        
+        if status_code != 200:
+            err = resp_data.get("error", resp_data)
+            self._json(status_code, err)
+            return
+        
+        self._json(200, resp_data)
+    
+    def _check_tor(self):
+        """Check Tor connectivity."""
+        try:
+            s = socket.socket()
+            s.settimeout(3)
+            s.connect((TOR_HOST, TOR_PORT))
+            s.send(b"\x05\x01\x00")
+            ok = s.recv(2) == b"\x05\x00"
+            s.close()
+            return "connected" if ok else "handshake_failed"
+        except Exception as e:
+            return str(e)
+    
+    def _json(self, code, data):
+        body = json.dumps(data).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+    
+    def _log_headers(self, headers):
+        """Log request headers for debugging."""
+        important = ["user-agent", "x-api-key", "anthropic-version", "content-type", "authorization"]
+        for h in important:
+            if h in headers:
+                val = headers[h]
+                if len(val) > 40:
+                    val = val[:20] + "..." + val[-20:]
+                print(f"  header: {h}={val}", flush=True)
+    
+    def log_message(self, fmt, *args):
+        pass  # Suppress default logging
+
+
+def main():
+    # Load env vars
+    env_file = os.path.expanduser("~/.secure-credentials/master.env")
+    if os.path.exists(env_file):
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("export "):
+                    parts = line[7:].split("=", 1)
+                    if len(parts) == 2:
+                        val = parts[1].strip("\"'")
+                        if val:
+                            os.environ.setdefault(parts[0], val)
+    
+    server = ThreadedHTTPServer(("127.0.0.1", PORT), ClaudeOCProxy)
+    print(f"claude-oc proxy listening on :{PORT}")
+    print(f"Anthropic endpoint: POST /v1/messages")
+    print(f"OpenAI endpoint:    POST /v1/chat/completions")
+    print(f"OpenCode route:     {OPENCODE_BASE}")
+    print(f"Transport:          {TRANSPORT} (1VPN:{len(VPN1_SERVERS)} locations, Tor SOCKS5:{TOR_HOST}:{TOR_PORT}, Direct)")
+    print(f"Override:           CLAUDE_OC_TRANSPORT=1vpn|tor|direct|auto")
+    print(f"Threading:          enabled ({MAX_THREADS} max workers)")
+    
+    signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    main()

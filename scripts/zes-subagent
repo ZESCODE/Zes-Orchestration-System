@@ -1,0 +1,335 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""zes-subagent — Multi-agent pipeline orchestrator for ZES.
+
+Spawns parallel sub-agents across different models/transports,
+collects results, and synthesizes final output.
+
+Usage:
+  zes-subagent run --task "..." [--plan plan.json]
+  zes-subagent research --topic "..."
+  zes-subagent build --spec "..."
+  zes-subagent review --files "file1,file2"
+  zes-subagent status
+"""
+
+import os, sys, json, time, threading
+from pathlib import Path
+from datetime import datetime
+
+# ─── Config ───────────────────────────────────────────────────
+AGENT_ROUTES = {
+    "hermes":  {"model": "claude-sonnet-5",     "transport": "1vpn-sgp", "label": "deepseek-v4-flash-free via SGP"},
+    "codex":   {"model": "claude-haiku-4-5",    "transport": "1vpn-lax", "label": "nemotron-3-ultra-free via LA"},
+    "claude":  {"model": "claude-opus-5",       "transport": "1vpn-sgp", "label": "deepseek-v4-flash-free via SGP"},
+    "premium": {"model": "claude-4-sonnet-*",   "transport": "1vpn-sgp", "label": "ling-3.0-flash-free via SGP"},
+    "fallback":{"model": "claude-3-5-haiku",    "transport": "tor",      "label": "gemini-3.6-flash via Tor"},
+}
+
+API_URL = "http://127.0.0.1:5905/v1/messages"
+API_KEY = "sk-test"
+
+RESULTS_DIR = Path.home() / ".zes" / "subagent-results"
+LOCK = threading.Lock()
+results = {}
+
+
+def call_agent(agent_name, system_prompt, user_task, timeout=120):
+    """Call a single agent via claude-oc API. Retries once on 502/503."""
+    route = AGENT_ROUTES.get(agent_name, AGENT_ROUTES["fallback"])
+    model = route["model"]
+    label = route["label"]
+
+    import urllib.request
+    import urllib.error
+
+    for attempt in range(2):
+        payload = json.dumps({
+            "model": model,
+            "max_tokens": 2048,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_task}]
+        }).encode()
+
+        req = urllib.request.Request(
+            API_URL,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": API_KEY,
+            },
+            method="POST"
+        )
+
+        try:
+            t0 = time.time()
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            elapsed = time.time() - t0
+            data = json.loads(resp.read().decode())
+
+            content = data.get("content", [])
+            text = ""
+            for block in content:
+                if block.get("type") == "text":
+                    text += block.get("text", "")
+
+            result = {
+                "agent": agent_name,
+                "model": model,
+                "transport": route["transport"],
+                "latency": f"{elapsed:.1f}s",
+                "status": "ok",
+                "output": text.strip(),
+            }
+            return result
+
+        except urllib.error.HTTPError as e:
+            if e.code in (502, 503) and attempt == 0:
+                time.sleep(2)
+                continue
+            return {
+                "agent": agent_name,
+                "model": model,
+                "transport": route["transport"],
+                "latency": "err",
+                "status": "error",
+                "output": f"HTTP {e.code}: {str(e)[:200]}",
+            }
+
+        except Exception as e:
+            return {
+                "agent": agent_name,
+                "model": model,
+                "transport": route["transport"],
+                "latency": "err",
+                "status": "error",
+                "output": str(e)[:300],
+            }
+
+    # Fallback (shouldn't reach here)
+    return {
+        "agent": agent_name,
+        "model": model,
+        "transport": route["transport"],
+        "latency": "err",
+        "status": "error",
+        "output": "Max retries exceeded",
+    }
+
+
+def run_parallel(agents, system_prompt, user_task, timeout=120):
+    """Run multiple agents in parallel threads."""
+    threads = []
+    results_list = [None] * len(agents)
+
+    def worker(i, name):
+        r = call_agent(name, system_prompt, user_task, timeout)
+        with LOCK:
+            results_list[i] = r
+
+    for i, name in enumerate(agents):
+        t = threading.Thread(target=worker, args=(i, name))
+        threads.append(t)
+        t.start()
+        print(f"  {chr(9203)} {name:10} {chr(8594)} {AGENT_ROUTES[name]['label']}")
+
+    for t in threads:
+        t.join()
+
+    return results_list
+
+
+def run_pipeline_with_synthesis(agents, system_prompt, user_task, timeout=120):
+    """Run agents in parallel, then synthesize results."""
+    print(f"\n{chr(9556)}" + "ZES Sub-Agent Pipeline".center(28, '=') + f"{chr(9559)}")
+    print(f"  Task: {user_task[:80]}")
+    print(f"  Agents: {', '.join(agents)}")
+    print(f"  Timeout: {timeout}s\n")
+
+    t0 = time.time()
+    results_list = run_parallel(agents, system_prompt, user_task, timeout)
+    total_time = time.time() - t0
+
+    print(f"\n  {'─'*4} Results ({total_time:.1f}s total) {'─'*4}")
+    full_outputs = {}
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    for r in results_list:
+        status_icon = "OK" if r["status"] == "ok" else "FAIL"
+        print(f"  {status_icon} {r['agent']:10} [{r['model']:20}] {r['latency']:>6}")
+
+        ts = int(time.time())
+        out_file = RESULTS_DIR / f"{r['agent']}-{ts}.txt"
+        out_file.write_text(r["output"])
+
+        preview = r["output"][:200].replace('\n', ' ')
+        print(f"     {chr(8618)} {preview}...")
+        print(f"     {chr(8618)} Saved: {out_file}")
+        full_outputs[r["agent"]] = r["output"]
+
+    # Synthesize if multiple results
+    if len(results_list) > 1:
+        ok_results = [r for r in results_list if r["status"] == "ok"]
+        if len(ok_results) >= 2:
+            syn_prompt = (
+                "You are a synthesis agent. Combine the following parallel research outputs "
+                "into a coherent, comprehensive final response. Identify key themes, "
+                "resolve contradictions, and present a unified answer.\n\n"
+            )
+            for r in ok_results:
+                syn_prompt += f"\n--- {r['agent']} ({r['model']}) ---\n{r['output'][:3000]}\n"
+
+            print(f"\n  {'─'*4} Synthesizing results {'─'*4}")
+            synth = call_agent("hermes",
+                "You synthesize multi-agent outputs into a unified response.",
+                syn_prompt)
+
+            if synth["status"] == "ok":
+                syn_file = RESULTS_DIR / f"synthesis-{int(time.time())}.txt"
+                syn_file.write_text(synth["output"])
+                print(f"\n  Synthesis ({synth['latency']}):")
+                synth_preview = synth["output"][:500].replace('\n', ' ')
+                print(f"     {synth_preview}")
+                print(f"     {chr(8618)} Saved: {syn_file}")
+            else:
+                print(f"\n  Synthesis failed: {synth['output']}")
+        else:
+            print(f"\n  Skipping synthesis: fewer than 2 successful results")
+
+    print(f"\n{chr(9562)}" + "".center(28, '=') + f"{chr(9565)}")
+    return results_list
+
+
+# ─── CLI Commands ──────────────────────────────────────────────
+
+def cmd_run(args):
+    agents = args.agents.split(",") if args.agents else ["hermes", "codex"]
+    system = args.system or "You are a helpful AI assistant."
+    run_pipeline_with_synthesis(agents, system, args.task, args.timeout)
+
+
+def cmd_research(args):
+    agents = ["hermes", "codex", "claude"]
+    system = (
+        "You are a research agent. Investigate the topic thoroughly. "
+        "Provide factual information, cite specific details. "
+        "Cover: key facts, context, implications, actionable takeaways."
+    )
+    run_pipeline_with_synthesis(agents, system, args.topic, args.timeout)
+
+
+def cmd_build(args):
+    print(f"\n{chr(9556)}" + "ZES Build Pipeline".center(28, '=') + f"{chr(9559)}")
+    print(f"  Spec: {args.spec[:80]}")
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Step 1: Codex implements
+    impl = call_agent("codex",
+        "You are a coding agent. Implement the feature described. "
+        "Write clean, working code. Output only the code.",
+        args.spec, args.timeout)
+    impl_icon = "OK" if impl["status"] == "ok" else "FAIL"
+    print(f"\n  {impl_icon} Codex build ({impl['latency']})")
+    impl_file = RESULTS_DIR / f"build-{int(time.time())}.txt"
+    impl_file.write_text(impl["output"])
+    print(f"     {chr(8618)} Saved: {impl_file}")
+
+    # Step 2: Claude reviews (if build succeeded)
+    if impl["status"] == "ok":
+        review = call_agent("claude",
+            "You are a code reviewer. Check for: correctness, edge cases, "
+            "security, style, completeness. Be specific and actionable.",
+            impl["output"], args.timeout)
+        rev_icon = "OK" if review["status"] == "ok" else "FAIL"
+        print(f"  {rev_icon} Claude review ({review['latency']})")
+        rev_file = RESULTS_DIR / f"review-{int(time.time())}.txt"
+        rev_file.write_text(review["output"])
+        print(f"     {chr(8618)} Saved: {rev_file}")
+
+    print(f"\n{chr(9562)}" + "".center(28, '=') + f"{chr(9565)}")
+
+
+def cmd_review(args):
+    files = args.files.split(",") if args.files else []
+    agents = ["hermes", "codex", "claude"]
+
+    contents = ""
+    for f in files:
+        f = f.strip()
+        if os.path.isfile(f):
+            contents += f"\n=== {f} ===\n{Path(f).read_text()[:2000]}\n"
+
+    system = (
+        "You are conducting a thorough review. Check for: "
+        "correctness, security, edge cases, performance, best practices."
+    )
+    task = f"Review this:\n{contents}" if contents else f"Review: {', '.join(files)}"
+    run_pipeline_with_synthesis(agents, system, task, args.timeout)
+
+
+def cmd_status(args):
+    print(f"\n{chr(9556)}" + "ZES Sub-Agent Status".center(28, '=') + f"{chr(9559)}")
+
+    print(f"\n  Agent Routes:")
+    for name, route in AGENT_ROUTES.items():
+        print(f"    {name:10} {chr(8594)} {route['model']:20} via {route['transport']}")
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    files = sorted(RESULTS_DIR.glob("*.txt"), key=os.path.getmtime, reverse=True)
+    print(f"\n  Recent Results ({len(files)} files):")
+    for f in files[:8]:
+        sz = f.stat().st_size
+        mt = datetime.fromtimestamp(f.stat().st_mtime).strftime("%H:%M:%S")
+        print(f"    {mt}  {sz:>6}B  {f.name}")
+
+    import urllib.request
+    try:
+        resp = urllib.request.urlopen("http://127.0.0.1:5905/health", timeout=3)
+        h = json.loads(resp.read().decode())
+        t = h.get("stats", {}).get("active_transport", "?")
+        tor = "connected" if h.get("tor") == "connected" else "down"
+        print(f"\n  Proxy: :5905 ({t})")
+        print(f"  Tor:   {tor}")
+    except Exception:
+        print(f"\n  Proxy: DOWN")
+
+    print(f"\n{chr(9562)}" + "".center(28, '=') + f"{chr(9565)}")
+
+
+# ─── CLI Entry ─────────────────────────────────────────────────
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="ZES Sub-Agent Pipeline Orchestrator")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_run = sub.add_parser("run", help="Custom pipeline")
+    p_run.add_argument("--agents", "-a", default="hermes,codex")
+    p_run.add_argument("--task", "-t", required=True)
+    p_run.add_argument("--system", "-s", default="")
+    p_run.add_argument("--timeout", type=int, default=120)
+    p_run.set_defaults(func=cmd_run)
+
+    p_res = sub.add_parser("research", help="Deep research (hermes+codex+claude)")
+    p_res.add_argument("--topic", "-t", required=True)
+    p_res.add_argument("--timeout", type=int, default=180)
+    p_res.set_defaults(func=cmd_research)
+
+    p_build = sub.add_parser("build", help="Codex builds + Claude reviews")
+    p_build.add_argument("--spec", "-s", required=True)
+    p_build.add_argument("--timeout", type=int, default=180)
+    p_build.set_defaults(func=cmd_build)
+
+    p_rev = sub.add_parser("review", help="Multi-agent review")
+    p_rev.add_argument("--files", "-f", required=True)
+    p_rev.add_argument("--timeout", type=int, default=120)
+    p_rev.set_defaults(func=cmd_review)
+
+    sub.add_parser("status", help="Pipeline health").set_defaults(func=cmd_status)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
